@@ -83,7 +83,11 @@ def test_no_secret_material_in_the_repo() -> None:
             for m in pattern.finditer(text):
                 line = text[:m.start()].count("\n") + 1
                 context = text.splitlines()[line - 1] if line <= len(text.splitlines()) else ""
-                if "FAKE_KEY" in context or "REDACTED" in context or "not a real key" in context:
+                # Test fixtures legitimately contain credential-SHAPED strings.
+                # They must say so on the same line, so that an unmarked one is
+                # always a finding rather than something the scanner guesses at.
+                if any(marker in context for marker in
+                       ("FAKE_KEY", "REDACTED", "not a real key", "not real keys")):
                     continue
                 hits.append(f"{path.relative_to(ROOT)}:{line} {label}")
     check("no credential material committed", not hits, "; ".join(hits))
