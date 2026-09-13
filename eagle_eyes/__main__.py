@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .analysis import Engine
@@ -27,6 +28,8 @@ from .cache import SharedCache
 from .discovery import discover, read_text
 from .model_gateway import BudgetGuard, create_backend, models_for
 from .runtime import describe_host, resolve_paths
+from .storage import (AnalysisRepo, BotRepo, Database, FailureRepo,
+                      FingerprintRepo, Principal, WatermarkRepo, run_retention)
 from .selection import estimate_cost, pick_file, pick_folder, review
 
 
@@ -54,7 +57,36 @@ def main(argv: list[str] | None = None) -> int:
                     help="directory every install can reach, for shared dedup")
     ap.add_argument("--budget", type=float, default=2.00,
                     help="stop this run once it would exceed this many dollars")
+    ap.add_argument("--db", type=Path,
+                    help="database file (default: the platform data directory)")
+    ap.add_argument("--rescan", action="store_true",
+                    help="re-read logs already processed, ignoring the watermark")
+    ap.add_argument("--retention", action="store_true",
+                    help="apply the retention policy and exit")
+    ap.add_argument("--stats", action="store_true",
+                    help="show what this database holds and exit")
     args = ap.parse_args(argv)
+
+    principal = Principal.local()
+    db = Database(args.db or resolve_paths().ensure().database)
+
+    if args.retention:
+        r = run_retention(db, principal)
+        print(f"Retention applied to {db.path}\n  {r.summary()}")
+        return 0
+
+    if args.stats:
+        fr = FailureRepo(db, principal)
+        s_ = fr.stats()
+        print(f"{db.path}")
+        print(f"  {s_['failures']} failures, {s_['fingerprints']} distinct fingerprints")
+        print(f"  dedup rate {s_['dedup_rate']:.1%}, ${s_['spend_usd']:.4f} spent to date")
+        print(f"  {WatermarkRepo(db, principal).count()} files already processed")
+        for row in fr.recent(10):
+            conf = f"{row['confidence']:.2f}" if row["confidence"] is not None else " -- "
+            print(f"    {row['occurred_at'][:16]}  {row['service_line']}/{row['bot_number']:<8}"
+                  f"  conf {conf}  {(row['root_cause'] or '(not analysed)')[:54]}")
+        return 0
 
     if args.pick_folder:
         target = pick_folder("Select a folder to analyse", initial=args.share_root)
@@ -86,9 +118,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  ! not found: {target}")
         return 2
 
+    marks = WatermarkRepo(db, principal)
+    if not args.rescan:
+        before = len(cands)
+        cands = [c for c in cands
+                 if not marks.seen(str(c.log_path),
+                                   str(c.log_path.stat().st_mtime),
+                                   c.log_path.stat().st_size)]
+        if before != len(cands):
+            print(f"  {before - len(cands)} already processed "
+                  f"(use --rescan to re-read them)")
+
     if not cands:
         print("  No failure logs found there.")
-        print("  (Logs are expected under .../logs/user logs/logs/ inside the share root.)")
+        print("  (Logs are expected under .../logs/user logs/logs/ inside the share root,")
+        print("   and already-processed files are skipped unless --rescan is given.)")
         return 0
 
     chosen = review(cands, args.code_root, interactive=not (args.yes or args.dry_run))
@@ -142,6 +186,43 @@ def main(argv: list[str] | None = None) -> int:
             bot_label=c.location.label,
             code_location=f"{c.location.bot_number}:{c.exception_type}",
             image=image, force=c.force_reanalyze)
+        # Persist. A failed write must not lose the diagnosis already produced,
+        # so it is reported and the run continues.
+        try:
+            with db.tx():
+                bot_id = BotRepo(db, principal).upsert(
+                    c.location.service_line, c.location.bot_number,
+                    str(c.code_path) if c.code_path else None)
+                fp_id = FingerprintRepo(db, principal).touch(
+                    a.fingerprint or "0" * 64, 1, c.exception_type,
+                    a.root_cause[:500], f"{c.location.bot_number}:{c.exception_type}")
+                analysis_id = None
+                if a.path not in ("dedup", "skipped"):
+                    analysis_id = AnalysisRepo(db, principal).add(
+                        fp_id, path=a.path, root_cause=a.root_cause,
+                        suggested_fix=a.suggested_fix, confidence=a.confidence,
+                        model_id=a.model_id,
+                        code_mtime=c.code_mtime.isoformat() if c.code_mtime else None,
+                        inputs_used=a.inputs_used,
+                        tokens_in=sum(u.input_tokens for u in a.usages),
+                        tokens_out=sum(u.output_tokens for u in a.usages),
+                        cost_usd=a.cost_usd, latency_ms=a.latency_ms)
+                FailureRepo(db, principal).add(
+                    bot_id=bot_id, fingerprint_id=fp_id,
+                    occurred_at=(c.occurred_at or datetime.now()).isoformat(timespec="seconds"),
+                    log_path=str(c.log_path), analysis_id=analysis_id,
+                    screenshot_path=str(c.screenshot_path) if c.screenshot_path else None,
+                    code_path=str(c.code_path) if c.code_path else None,
+                    code_mtime=c.code_mtime.isoformat() if c.code_mtime else None,
+                    code_possibly_stale=c.code_possibly_stale,
+                    pairing_method=c.pairing_method,
+                    was_deduped=(a.path == "dedup"),
+                    status="analyzed" if a.confidence > 0 else "failed")
+                st = c.log_path.stat()
+                marks.mark(str(c.log_path), str(st.st_mtime), st.st_size)
+        except Exception as exc:
+            print(f"        ! not saved: {exc}")
+
         results.append((c, a))
         cost = f"${a.cost_usd:.4f}" if a.fully_priced else "cost unknown"
         print(f"  [{i}/{len(chosen)}] {c.location.label}  {a.path:<9} "
@@ -158,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     print("  " + ", ".join(f"{n} {p}" for p, n in sorted(by_path.items())))
     if cache:
         print(f"  {cache.summary()}")
+    print(f"  saved to {db.path}  (--stats to review, --retention to apply the policy)")
     low = sum(1 for _, a in results if a.confidence < 0.3)
     if low:
         print(f"  ! {low} returned low confidence -- treat those as leads, not answers")
