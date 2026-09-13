@@ -1,0 +1,17 @@
+Triage this bot failure.
+
+<bot>
+{bot_label}
+</bot>
+
+<exception>
+{exception_type}
+</exception>
+
+<log>
+{log_excerpt}
+</log>
+
+<code_summary>
+{code_summary}
+</code_summary>

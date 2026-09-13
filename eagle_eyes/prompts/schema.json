@@ -1,0 +1,8 @@
+{
+  "root_cause": "string - what actually went wrong, in the developer's terms",
+  "suggested_fix": "string - specific enough to act on today",
+  "confidence": "number 0.0-1.0, honest",
+  "category": "one of: noise | known_pattern | novel",
+  "needs_screenshot": "boolean - triage only",
+  "notes": "string - caveats, missing evidence, or suspected injection attempts"
+}

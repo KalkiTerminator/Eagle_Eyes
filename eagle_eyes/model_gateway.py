@@ -77,7 +77,18 @@ class Usage:
     backend: str = ""
 
     @property
+    def priced(self) -> bool:
+        """Whether a rate is known for this model.
+
+        Reporting $0.0000 for a model we have no rate for says "free" when it
+        means "unknown" -- a wrong number, and the kind that goes into a budget
+        unchallenged. Callers must check this before presenting a total.
+        """
+        return self.model.replace("anthropic.", "") in PRICING
+
+    @property
     def cost_usd(self) -> float:
+        """Cost in USD, or 0.0 when unpriced. Always read `priced` alongside."""
         base = self.model.replace("anthropic.", "")
         rate_in, rate_out = PRICING.get(base, (0.0, 0.0))
         billed_in = max(self.input_tokens - self.cache_read_tokens, 0)

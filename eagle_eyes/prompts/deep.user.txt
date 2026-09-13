@@ -1,0 +1,21 @@
+Diagnose this bot failure.
+
+<inputs_provided>
+{inputs_provided}
+</inputs_provided>
+
+<bot>
+{bot_label}
+</bot>
+
+<exception>
+{exception_type}
+</exception>
+
+<log>
+{log_excerpt}
+</log>
+
+<code path="{code_path}" possibly_stale="{code_stale}">
+{code_text}
+</code>

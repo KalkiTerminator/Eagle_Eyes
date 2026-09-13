@@ -22,8 +22,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from .discovery import discover
-from .selection import gui_available, pick_file, pick_folder, review, estimate_cost
+from .analysis import Engine
+from .cache import SharedCache
+from .discovery import discover, read_text
+from .model_gateway import BudgetGuard, create_backend, models_for
+from .runtime import describe_host, resolve_paths
+from .selection import estimate_cost, pick_file, pick_folder, review
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +45,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the review and run everything found (for the scheduler)")
     ap.add_argument("--dry-run", action="store_true",
                     help="show what would be analysed, then stop")
+    ap.add_argument("--backend", default="mock", choices=["mock", "bedrock", "byok"],
+                    help="mock costs nothing and needs no credentials (default)")
+    ap.add_argument("--region", default="", help="AWS region, for the bedrock backend")
+    ap.add_argument("--screenshot-mode", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="0 = never send a screenshot to a model (default)")
+    ap.add_argument("--shared-cache", type=Path,
+                    help="directory every install can reach, for shared dedup")
+    ap.add_argument("--budget", type=float, default=2.00,
+                    help="stop this run once it would exceed this many dollars")
     args = ap.parse_args(argv)
 
     if args.pick_folder:
@@ -89,12 +102,65 @@ def main(argv: list[str] | None = None) -> int:
     if not chosen:
         return 0
 
-    print(f"\n{len(chosen)} selected. The analysis engine is not wired up yet;")
-    print("this run stops here rather than pretending to have diagnosed anything.")
-    for c in chosen[:5]:
-        print(f"  - {c.location.label}  {c.exception_type.split('.')[-1]}  [{c.inputs}]")
-    if len(chosen) > 5:
-        print(f"  ... and {len(chosen) - 5} more")
+    # ---- analyse ----------------------------------------------------
+    try:
+        backend = create_backend(
+            {"backend": args.backend, "region": args.region},
+            environment="local")
+    except Exception as exc:
+        print(f"\n  ! {exc}")
+        return 3
+
+    cache = SharedCache(args.shared_cache, written_by=describe_host()["machine"]) \
+        if args.shared_cache else None
+    if cache and not cache.available:
+        print(f"\n  note: {cache.reason}")
+
+    engine = Engine(
+        backend, models_for(backend.name),
+        budget=BudgetGuard(daily_usd=args.budget, per_run_usd=args.budget,
+                           single_call_usd=max(args.budget / 4, 0.05)),
+        cache=cache, screenshot_mode=args.screenshot_mode)
+
+    print(f"\nAnalysing {len(chosen)} failures via {backend.name}"
+          f"{' (no model call, no cost)' if backend.name == 'mock' else ''} ...\n")
+
+    results = []
+    for i, c in enumerate(chosen, 1):
+        image = None
+        if c.screenshot_path and c.send_screenshot and args.screenshot_mode > 0:
+            try:
+                image = c.screenshot_path.read_bytes()
+            except OSError:
+                image = None
+        a = engine.analyse(
+            log_text=read_text(c.log_path),
+            code_text=read_text(c.code_path) if c.code_path else "",
+            code_path=str(c.code_path or ""),
+            code_mtime=c.code_mtime.isoformat() if c.code_mtime else None,
+            code_stale=c.code_possibly_stale,
+            bot_label=c.location.label,
+            code_location=f"{c.location.bot_number}:{c.exception_type}",
+            image=image, force=c.force_reanalyze)
+        results.append((c, a))
+        cost = f"${a.cost_usd:.4f}" if a.fully_priced else "cost unknown"
+        print(f"  [{i}/{len(chosen)}] {c.location.label}  {a.path:<9} "
+              f"conf {a.confidence:.2f}  {cost}")
+        print(f"        {a.root_cause[:96]}")
+
+    spent = sum(a.cost_usd for _, a in results)
+    unpriced = sum(1 for _, a in results if not a.fully_priced and a.usages)
+    by_path: dict[str, int] = {}
+    for _, a in results:
+        by_path[a.path] = by_path.get(a.path, 0) + 1
+    print(f"\n  {len(results)} analysed, ${spent:.4f} spent"
+          + (f"  (+{unpriced} with no known rate -- not counted)" if unpriced else ""))
+    print("  " + ", ".join(f"{n} {p}" for p, n in sorted(by_path.items())))
+    if cache:
+        print(f"  {cache.summary()}")
+    low = sum(1 for _, a in results if a.confidence < 0.3)
+    if low:
+        print(f"  ! {low} returned low confidence -- treat those as leads, not answers")
     return 0
 
 

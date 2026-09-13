@@ -158,9 +158,21 @@ def test_mock_is_usable_without_anything() -> None:
     check("mock says plainly that nothing was analysed", "MOCK" in r.text)
 
 
+def test_unknown_pricing_is_not_reported_as_free() -> None:
+    known = Usage(model="claude-sonnet-5", input_tokens=1000, output_tokens=100)
+    unknown = Usage(model="house-model-v2", input_tokens=1000, output_tokens=100)
+    check("a known model is priced", known.priced and known.cost_usd > 0)
+    check("an unknown model is flagged unpriced", not unknown.priced)
+    check("  and does not claim to be free", unknown.cost_usd == 0.0 and not unknown.priced)
+    check("the bedrock prefix still resolves",
+          Usage(model="anthropic.claude-sonnet-5", input_tokens=1).priced)
+
+
 if __name__ == "__main__":
     for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'All checks passed.' if not _failures else str(len(_failures)) + ' FAILED: ' + ', '.join(_failures)}")
     sys.exit(1 if _failures else 0)
+
+
