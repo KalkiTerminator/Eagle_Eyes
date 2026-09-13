@@ -1,0 +1,7 @@
+Directory of \\VM-FIN-14\Network_Sharing_Folder\data\FINANCE_AP\BOT201\2026\09\11\logs\user logs\screenshot
+
+11-09-2026  09:41         218,114  2026-09-11_09-41-09.png
+11-09-2026  10:02         204,880  2026-09-11_10-02-51.png
+11-09-2026  10:03         211,067  2026-09-11_10-03-04.png     <-- 13s after the one above
+11-09-2026  11:47         199,442  2026-09-11_11-47-22.png
+               4 File(s)        833,503 bytes

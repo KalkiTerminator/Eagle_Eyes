@@ -1,0 +1,109 @@
+// ---------------------------------------------------------------------------
+// Pasted out of iBot designer -> Notepad -> saved as .txt
+// Process : AP_RemittancePosting      Bot: BOT201      Line: FINANCE_AP
+// No version stamp is included in the copy output.
+// ---------------------------------------------------------------------------
+
+using System;
+using System.Collections.Generic;
+using System.Data;
+using OpenQA.Selenium;
+using OpenQA.Selenium.Chrome;
+using OpenQA.Selenium.Support.UI;
+using SeleniumExtras.WaitHelpers;
+using iBot.Runtime;
+
+namespace iBot.Processes.Finance
+{
+    public class AP_RemittancePosting : ProcessBase
+    {
+        private IWebDriver driver;
+        private WebDriverWait wait;
+        private const int DefaultTimeoutSec = 30;
+
+        public override void Initialize(QueueItem item)
+        {
+            var opts = new ChromeOptions();
+            opts.AddArgument("--start-maximized");
+            opts.AddArgument("--disable-gpu");
+            opts.AddUserProfilePreference("download.default_directory", @"D:\ibot\downloads");
+
+            driver = new ChromeDriver(@"C:\ibot\drivers", opts);
+            wait   = new WebDriverWait(driver, TimeSpan.FromSeconds(DefaultTimeoutSec));
+
+            Log.Info($"Chrome session started for queue item {item.Id}");
+        }
+
+        public override void Execute(QueueItem item)
+        {
+            string batchId = item.GetParameter("BatchId");
+            driver.Navigate().GoToUrl("https://polcore.internal/finance/remittance");
+
+            Login(Credentials.Get("SVC_POLCORE_BOT"));
+
+            DataTable rows = ExcelHelper.ReadRange(
+                $@"D:\ibot\input\batch_{batchId}\remittance_{batchId}.xlsx", "Sheet1", "A2:H5000");
+
+            Log.Info($"Loaded {rows.Rows.Count} remittance rows for batch {batchId}");
+
+            for (int i = 0; i < rows.Rows.Count; i++)
+            {
+                string policyRef = rows.Rows[i]["PolicyRef"].ToString();
+                string amount    = rows.Rows[i]["Amount"].ToString();
+
+                Queue.SetStatus(item, "InProgress");
+                PostSingleRemittance(policyRef, amount, i + 1, rows.Rows.Count);
+            }
+        }
+
+        private void Login(Credential cred)
+        {
+            wait.Until(ExpectedConditions.ElementIsVisible(By.Id("username"))).SendKeys(cred.User);
+            driver.FindElement(By.Id("password")).SendKeys(cred.Password);
+            driver.FindElement(By.Id("btnLogin")).Click();
+            wait.Until(ExpectedConditions.ElementExists(By.CssSelector("div.app-shell")));
+        }
+
+        private void PostSingleRemittance(string policyRef, string amount, int rowNo, int total)
+        {
+            Log.Info($"--- row {rowNo}/{total} | PolicyRef={policyRef} | Amount={amount}");
+
+            // The policy tab is rendered late by the SPA; wait for it explicitly.
+            wait.Until(ExpectedConditions.ElementToBeClickable(
+                By.XPath("//div[@id='policyTabs']//a[@data-tab='policy']"))).Click();
+
+            var refBox = driver.FindElement(By.Id("txtPolicyRef"));
+            refBox.Clear();
+            refBox.SendKeys(policyRef);
+            driver.FindElement(By.Id("btnSearch")).Click();
+
+            wait.Until(ExpectedConditions.ElementIsVisible(By.Id("gridResults")));
+
+            // Angular sometimes ignores SendKeys on the amount field; force it via JS.
+            var js = (IJavaScriptExecutor)driver;
+            js.ExecuteScript(
+                "var e=document.getElementById('txtAmount');" +
+                "e.value=arguments[0];" +
+                "e.dispatchEvent(new Event('input',{bubbles:true}));", amount);
+
+            driver.FindElement(By.Id("btnPost")).Click();
+            wait.Until(ExpectedConditions.ElementIsVisible(
+                By.XPath("//div[contains(@class,'toast-success')]")));
+
+            Log.Info($"Posted {policyRef} amount {amount}");
+        }
+
+        public override void OnError(Exception ex, QueueItem item)
+        {
+            Log.Error(ex.ToString());
+            Screenshot.Capture(driver);        // writes to the dated screenshot folder
+            Queue.SetStatus(item, "Failed");
+            throw;
+        }
+
+        public override void Dispose()
+        {
+            try { driver?.Quit(); } catch { /* driver already gone */ }
+        }
+    }
+}

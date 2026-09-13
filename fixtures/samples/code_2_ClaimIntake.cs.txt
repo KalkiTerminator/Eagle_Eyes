@@ -1,0 +1,94 @@
+// ---------------------------------------------------------------------------
+// Process : CLM_ClaimIntake      Bot: BOT101      Line: CLAIMS_PROC
+// Mixed web + legacy desktop: ClaimsDesk web portal, then a WinForms uploader.
+// ---------------------------------------------------------------------------
+
+using System;
+using System.IO;
+using System.Threading;
+using OpenQA.Selenium;
+using OpenQA.Selenium.Chrome;
+using OpenQA.Selenium.Interactions;
+using OpenQA.Selenium.Support.UI;
+using iBot.Runtime;
+using iBot.Desktop;
+
+namespace iBot.Processes.Claims
+{
+    public class CLM_ClaimIntake : ProcessBase
+    {
+        private IWebDriver driver;
+        private WebDriverWait wait;
+
+        public override void Execute(QueueItem item)
+        {
+            driver = new ChromeDriver(@"C:\ibot\drivers", BuildOptions());
+            wait   = new WebDriverWait(driver, TimeSpan.FromSeconds(20));
+
+            driver.Navigate().GoToUrl("https://claimsdesk.internal:8443/intake");
+            Authenticate();
+
+            foreach (var claim in GetClaimBatch(item))
+            {
+                OpenClaimForm();
+                FillClaimHeader(claim);
+                AttachDocuments(claim);      // desktop file dialog, not Selenium
+                SubmitClaim(claim);
+            }
+        }
+
+        private void OpenClaimForm()
+        {
+            // The New Claim button sits under a notification bar that sometimes
+            // stays up. Scroll it into view before clicking.
+            var btn = wait.Until(d => d.FindElement(By.Id("btnNewClaim")));
+            ((IJavaScriptExecutor)driver)
+                .ExecuteScript("arguments[0].scrollIntoView({block:'center'});", btn);
+            btn.Click();
+            wait.Until(d => d.FindElement(By.CssSelector("form#claimForm")));
+        }
+
+        private void FillClaimHeader(Claim claim)
+        {
+            driver.FindElement(By.Id("claimantName")).SendKeys(claim.ClaimantName);
+            driver.FindElement(By.Id("policyNumber")).SendKeys(claim.PolicyNumber);
+
+            new SelectElement(driver.FindElement(By.Id("lossType")))
+                .SelectByText(claim.LossType);
+
+            var dateBox = driver.FindElement(By.Id("lossDate"));
+            dateBox.SendKeys(claim.LossDate.ToString("dd/MM/yyyy"));
+            dateBox.SendKeys(Keys.Escape);   // dismiss the datepicker overlay
+        }
+
+        private void AttachDocuments(Claim claim)
+        {
+            driver.FindElement(By.Id("btnAttach")).Click();
+
+            // Windows file dialog - Selenium cannot see this.
+            var dlg = DesktopWindow.WaitFor("Open", 15000);
+            dlg.FindControl("Edit", "File name:").SetText(claim.DocumentPath);
+            dlg.FindControl("Button", "Open").Invoke();
+
+            wait.Until(d => d.FindElement(By.CssSelector("li.attachment-row")));
+        }
+
+        private void SubmitClaim(Claim claim)
+        {
+            new Actions(driver)
+                .MoveToElement(driver.FindElement(By.Id("btnSubmit")))
+                .Click()
+                .Perform();
+
+            wait.Until(d => d.FindElement(By.CssSelector("div.confirmation-ref")));
+            Log.Info($"Claim submitted for policy {claim.PolicyNumber}");
+        }
+
+        public override void OnError(Exception ex, QueueItem item)
+        {
+            Log.Error(ex.ToString());
+            Screenshot.Capture(driver);
+            throw;
+        }
+    }
+}

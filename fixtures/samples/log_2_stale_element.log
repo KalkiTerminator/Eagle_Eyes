@@ -1,0 +1,29 @@
+=========================================================================
+ iBot Runtime 7.4.2  |  Execution Log
+=========================================================================
+Process      : CLM_ClaimIntake
+BotNumber    : BOT101
+ServiceLine  : CLAIMS_PROC
+Machine      : VM-CLM-22
+QueueItem    : 8841902
+Started      : 11-09-2026 06:30:01.117
+-------------------------------------------------------------------------
+11-09-2026 06:30:01.117 [INFO ] Runtime initialised (v7.4.2, .NET 4.8.9256.0)
+11-09-2026 06:30:02.884 [INFO ] Starting ChromeDriver 128.0.6613.119 on port 49877
+11-09-2026 06:30:05.201 [INFO ] Chrome session 3ab77e1c05f94d2b8e6a44c1 started
+11-09-2026 06:30:05.556 [INFO ] Navigate: https://claimsdesk.internal:8443/intake
+11-09-2026 06:30:09.881 [INFO ] Authenticated as SVC_CLAIMS_BOT
+11-09-2026 06:30:12.004 [INFO ] Claim batch 2210 loaded, 47 claims
+11-09-2026 06:30:12.118 [INFO ] --- claim 1/47 | Policy=POL-771044
+11-09-2026 06:30:18.339 [INFO ] Claim submitted for policy POL-771044
+11-09-2026 06:30:18.441 [INFO ] --- claim 2/47 | Policy=POL-771045
+11-09-2026 06:30:24.770 [ERROR] Activity 'FillClaimHeader' failed at claim 2 of 47
+11-09-2026 06:30:24.773 [ERROR] OpenQA.Selenium.StaleElementReferenceException: stale element reference: element is not attached to the page document
+  (Session info: chrome=128.0.6613.120)
+   at OpenQA.Selenium.WebDriver.UnpackAndThrowOnError(Response errorResponse, String commandToExecute)
+   at OpenQA.Selenium.WebElement.SendKeys(String text)
+   at iBot.Processes.Claims.CLM_ClaimIntake.FillClaimHeader(Claim claim) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 61
+   at iBot.Processes.Claims.CLM_ClaimIntake.Execute(QueueItem item) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 38
+   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
+11-09-2026 06:30:24.820 [INFO ] Screenshot captured
+11-09-2026 06:30:26.010 [INFO ] Run terminated with status FAILED after 00:00:24

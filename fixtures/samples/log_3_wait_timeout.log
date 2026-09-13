@@ -1,0 +1,30 @@
+=========================================================================
+ iBot Runtime 7.4.2  |  Execution Log
+=========================================================================
+Process      : CLM_ClaimIntake
+BotNumber    : BOT103
+ServiceLine  : CLAIMS_PROC
+Machine      : VM-CLM-07
+QueueItem    : 8842330
+Started      : 11-09-2026 14:05:44.902
+-------------------------------------------------------------------------
+11-09-2026 14:05:44.902 [INFO ] Runtime initialised (v7.4.2, .NET 4.8.9256.0)
+11-09-2026 14:05:46.110 [INFO ] Starting ChromeDriver 129.0.6668.58 on port 50122
+11-09-2026 14:05:48.775 [INFO ] Chrome session c40f8821b6ae4f37902d115e started
+11-09-2026 14:05:49.003 [INFO ] Navigate: https://claimsdesk.internal:8443/intake
+11-09-2026 14:05:53.664 [INFO ] Authenticated as SVC_CLAIMS_BOT
+11-09-2026 14:05:54.118 [INFO ] --- claim 1/12 | Policy=POL-880231
+11-09-2026 14:06:14.229 [WARN ] Wait exceeded 20s for li.attachment-row
+11-09-2026 14:06:14.233 [ERROR] Activity 'AttachDocuments' failed at claim 1 of 12
+11-09-2026 14:06:14.236 [ERROR] OpenQA.Selenium.WebDriverTimeoutException: Timed out after 20 seconds
+ ---> OpenQA.Selenium.NoSuchElementException: no such element: Unable to locate element: {"method":"css selector","selector":"li.attachment-row"}
+  (Session info: chrome=129.0.6668.58)
+   at OpenQA.Selenium.WebDriver.UnpackAndThrowOnError(Response errorResponse, String commandToExecute)
+   at OpenQA.Selenium.WebDriver.FindElement(String mechanism, String value)
+   --- End of inner exception stack trace ---
+   at OpenQA.Selenium.Support.UI.DefaultWait`1.Until[TResult](Func`2 condition, CancellationToken token)
+   at iBot.Processes.Claims.CLM_ClaimIntake.AttachDocuments(Claim claim) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 79
+   at iBot.Processes.Claims.CLM_ClaimIntake.Execute(QueueItem item) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 39
+   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
+11-09-2026 14:06:14.290 [INFO ] Screenshot captured
+11-09-2026 14:06:15.550 [INFO ] Run terminated with status FAILED after 00:00:30

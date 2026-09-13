@@ -173,24 +173,34 @@ this rather than assume it.
 
 Triage decides whether a screenshot is needed. The rule:
 
-**Escalate to vision when the failure is about what was on screen:**
-- Selector / UI element not found
-- Click, type, or hover failed on a present element
-- Unexpected window, modal, or dialog
-- Image or OCR match failure
-- Application unresponsive or hung
-- Timeout waiting for a UI element
-- Any failure inside a Citrix / virtual-desktop interaction (the RPA tool sees only pixels there)
+The bots are C#/.NET driving **Selenium**, so the taxonomy is web-automation exceptions, not
+Windows-desktop ones.
 
-**Do not escalate when the failure is about data, I/O, or logic:**
-- File not found, permission denied, path errors
-- HTTP / API / web-service errors
-- Database and SQL errors
-- Parse, format, and type-conversion errors
-- Null reference in data processing
-- Authentication and credential expiry
-- Queue and transaction errors
-- Arithmetic errors
+**Escalate to vision — the screen shows the answer:**
+
+| Exception | Why the screenshot decides it |
+|---|---|
+| `ElementClickInterceptedException` | Selenium names the intercepting element, but *why* it is there — a cookie banner, a session-warning bar, a modal — is visible only on screen. **The single best vision case in the whole taxonomy.** |
+| `NoSuchElementException` | Did the page render? Did it render something else — an error page, a login redirect, an empty result? |
+| `WebDriverTimeoutException` | What was the page doing while the wait expired: spinner, blank, partial render, error toast? |
+| `ElementNotInteractableException` | Element present but hidden, disabled, or covered |
+| `UnhandledAlertException` | The alert text is on screen |
+| Desktop dialog failures (`DesktopWindow.WaitFor`) | Outside Selenium's view entirely; pixels are the only evidence |
+
+**Do not escalate — the log already says it:**
+
+| Exception | Why |
+|---|---|
+| `StaleElementReferenceException` | A timing/re-render fault. The screenshot shows the *post*-failure DOM, which is not the state that went stale. |
+| `WebDriverException: net::ERR_*` | Network layer, nothing visual |
+| `System.IO.*`, file and path errors | No browser involvement |
+| `SqlException`, data access | No browser involvement |
+| Credential and auth failures returning a clear code | The log carries the reason |
+| `SessionNotCreatedException` (driver/browser version mismatch) | Infrastructure; the message is self-explanatory |
+
+`StaleElementReferenceException` is the one worth arguing about. It is tempting to escalate because
+it is a UI exception — but by the time the screenshot is taken the page has already re-rendered, so
+the image shows a state that looks fine and can actively mislead the diagnosis. Leave it text-only.
 
 Default when triage is uncertain: **text-only**. Escalation must be affirmative. §7 explains why
 this default costs almost nothing.
@@ -306,7 +316,7 @@ backlog, not the average day.
 
 | Signal | Threshold | Why it matters |
 |---|---|---|
-| **Dedup hit rate drop** | <50% over 1h | **The highest-value alert.** Fingerprint regression → 3× cost. Leading indicator of a bug, not just a bill. |
+| **Dedup hit rate drop** | <50% over 1h | **The highest-value alert.** A cold cache costs 3.3× a warm one. Two known causes: a fingerprint regression, and a **browser update** — Selenium stamps the Chrome build into every exception message, so an estate-wide Chrome rollout used to reset every fingerprint at once (`DATA_MODEL.md` §2.3). Normalization handles it now; the alert is the backstop if a new version format slips through. |
 | Daily spend | >60% of cap by noon | Early warning |
 | Vision escalation rate | >50% of deep | Gate mis-tuned |
 | Cost per analysis | >2× baseline | Prompt bloat or a model change |

@@ -1,0 +1,37 @@
+=========================================================================
+ iBot Runtime 7.4.2  |  Execution Log
+=========================================================================
+Process      : AP_RemittancePosting
+BotNumber    : BOT201
+ServiceLine  : FINANCE_AP
+Machine      : VM-FIN-14
+QueueItem    : 8842137
+Started      : 11-09-2026 09:14:22.318
+-------------------------------------------------------------------------
+11-09-2026 09:14:22.318 [INFO ] Runtime initialised (v7.4.2, .NET 4.8.9256.0)
+11-09-2026 09:14:22.402 [INFO ] Queue item 8842137 dequeued (BatchId=4471)
+11-09-2026 09:14:24.117 [INFO ] Starting ChromeDriver 128.0.6613.119 on port 51043
+11-09-2026 09:14:24.118 [INFO ] Only local connections are allowed.
+11-09-2026 09:14:26.550 [INFO ] Chrome session 9f2c41ab7d8e4c5fa1b03e6d started
+11-09-2026 09:14:26.882 [INFO ] Navigate: https://polcore.internal/finance/remittance
+11-09-2026 09:14:31.004 [INFO ] Login submitted for SVC_POLCORE_BOT
+11-09-2026 09:14:35.229 [INFO ] Loaded 318 remittance rows for batch 4471
+11-09-2026 09:14:35.233 [INFO ] --- row 1/318 | PolicyRef=POL-448192 | Amount=1240.55
+11-09-2026 09:14:38.771 [INFO ] Posted POL-448192 amount 1240.55
+[... 211 rows elided by log rotation ...]
+11-09-2026 09:41:02.664 [INFO ] --- row 213/318 | PolicyRef=POL-448404 | Amount=17655.20
+11-09-2026 09:41:04.881 [WARN ] Retry 1/3 after ElementClickInterceptedException
+11-09-2026 09:41:07.115 [WARN ] Retry 2/3 after ElementClickInterceptedException
+11-09-2026 09:41:09.338 [WARN ] Retry 3/3 failed
+11-09-2026 09:41:09.341 [ERROR] Activity 'PostSingleRemittance' failed at row 213 of 318
+11-09-2026 09:41:09.344 [ERROR] OpenQA.Selenium.ElementClickInterceptedException: element click intercepted: Element <a data-tab="policy" href="#policy">...</a> is not clickable at point (642, 318). Other element would receive the click: <div class="session-warning-banner" role="alert">...</div>
+  (Session info: chrome=128.0.6613.120)
+   at OpenQA.Selenium.WebDriver.UnpackAndThrowOnError(Response errorResponse, String commandToExecute)
+   at OpenQA.Selenium.WebDriver.Execute(String driverCommandToExecute, Dictionary`2 parameters)
+   at OpenQA.Selenium.WebElement.Click()
+   at iBot.Processes.Finance.AP_RemittancePosting.PostSingleRemittance(String policyRef, String amount, Int32 rowNo, Int32 total) in C:\ibot\processes\Finance\AP_RemittancePosting.cs:line 78
+   at iBot.Processes.Finance.AP_RemittancePosting.Execute(QueueItem item) in C:\ibot\processes\Finance\AP_RemittancePosting.cs:line 52
+   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
+11-09-2026 09:41:09.402 [INFO ] Screenshot captured
+11-09-2026 09:41:09.407 [ERROR] Queue item 8842137 marked Failed
+11-09-2026 09:41:10.903 [INFO ] Run terminated with status FAILED after 00:26:48

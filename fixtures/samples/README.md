@@ -1,94 +1,96 @@
-# Reference samples — plausible, not real
+# Reference samples
 
-Hand-written artifacts that approximate what iBot probably produces. **Every byte is invented.**
-They exist so the parser and the fingerprint can be developed against something with realistic
-shape, and so the questions below can be answered by comparison rather than description.
+Hand-written artifacts shaped like what iBot produces. **Every byte is invented** — no real system,
+no real people, no real policy numbers. They exist so the parser and the fingerprint can be built
+against something with realistic shape.
 
-Nothing here came from a real system. Nothing here should ever be replaced with something that did
-(`SECURITY.md` §11).
-
----
-
-## Code — three candidate formats. Which is closest?
-
-iBot has only a copy function, so what lands in the `.txt` is whatever the designer puts on the
-clipboard. That could be any of these shapes, and they are different enough to matter:
-
-| File | Shape | If this is it |
-|---|---|---|
-| `code_A_steptable.txt` | Tab-separated step table: step, action, target, value, timeout, on-error | Easiest to parse and the best case. Step numbers give precise code locations, and `OnError` columns are directly useful to a diagnosis. |
-| `code_B_script.txt` | VB-like in-house DSL with `Sub Main`, `On Error Goto` | Reads like source. Good for the model, and line numbers in a stack trace may map to it directly. |
-| `code_C_workflow.txt` | XAML-ish workflow XML with `DisplayName` attributes | Most verbose — 3–4× the tokens for the same logic, which shows up in `COST_MODEL.md` §3. Worth stripping attributes before sending. `DisplayName` maps cleanly to the activity names in logs. |
-
-**Tell me which is closest and I will drop the other two.** If it is none of them, a screenshot of
-the designer with a few steps visible is enough — I do not need the content, only the shape.
-
-The format choice has real consequences: C costs noticeably more per analysis than A, and A gives a
-far better code-location key for the fingerprint.
+Nothing here should ever be replaced with something real (`SECURITY.md` §11).
 
 ---
 
-## Logs — one format, three failures
+## What we now know about the real thing
 
-All three use the same invented iBot log format, deliberately including the things that break
-parsers written against tidy examples:
+Two facts, confirmed, that reshaped the design:
 
-- **CRLF line endings** and trailing whitespace
-- **.NET inner-exception chains** (`---> …` / `--- End of inner exception stack trace ---`)
-- **Retry attempts logged as WARN** before the final ERROR
-- **A line from another thread** interleaved mid-sequence (`[T:03] HeartbeatService`)
-- **An elision marker** where rotation dropped 210 rows
-- A **long exception message on a single line**, as .NET actually writes it
+1. **Bots are C#/.NET driving Selenium**, with some JavaScript executed through
+   `IJavaScriptExecutor`. This is **web automation**, not Windows-desktop automation — an entirely
+   different failure taxonomy from the one the first draft assumed.
+2. **Screenshot filenames carry a date and time only** — `2026-09-11_09-41-09.png`. No run ID, so
+   pairing a screenshot to a log depends on the clock (`ARCHITECTURE.md` §4.4).
 
-| File | Failure | Needs the screenshot? |
-|---|---|---|
-| `log_A_selector_not_found.log` | Selector fails after 3 retries mid-batch (row 213 of 318) | **Yes** — what was on screen decides it |
-| `log_B_excel_com_timeout.log` | Excel COM hang, wrapped in a retry `ActivityException` | No — a log-and-code diagnosis |
-| `log_C_credential_expired.log` | Service credential past max age, rejected with HTTP 401 | No |
+Earlier samples modelled a low-code Windows-desktop tool. They were wrong and have been deleted.
 
 ---
 
-## What these already changed in the design
+## Files
 
-Running the documented fingerprint over them found three defects. All were in `DATA_MODEL.md`, all
-would have shipped, and none were visible against the tidier generated fixtures.
+| File | What it is |
+|---|---|
+| `code_1_RemittancePosting.cs.txt` | C# Selenium process: ChromeDriver, `WebDriverWait`, `ExpectedConditions`, a JS-executor workaround for an Angular field |
+| `code_2_ClaimIntake.cs.txt` | C# Selenium **plus** a Windows file dialog Selenium cannot see — the mixed web/desktop case |
+| `log_1_click_intercepted.log` | `ElementClickInterceptedException` — a session-warning banner covers the tab. **Vision case.** |
+| `log_2_stale_element.log` | `StaleElementReferenceException` during `SendKeys`. **Not** a vision case, see below. |
+| `log_3_wait_timeout.log` | `WebDriverTimeoutException ---> NoSuchElementException` — a wrapped chain |
+| `screenshot_folder_listing/` | What a real screenshot folder listing looks like, including two files 13 seconds apart |
 
-**1. Fingerprinting on the wrong exception type.** iBot wraps retried activities, so `log_B` reports
-`iBot.Core.ActivityException ---> System.Runtime.InteropServices.COMException`. The documented rule
-took the outer type — which would have made *every retry-wrapped failure in the estate* the same
-exception type. An Excel COM hang and a locked-file `IOException` become indistinguishable. Since
-most activities that touch a UI or a file sit inside a `RetryScope`, this would have flattened a
-large share of all failures into one bucket. Fixed: unwrap the chain, fingerprint the innermost type
-(`DATA_MODEL.md` §2.2a).
-
-**2. The `0x…` rule destroyed HRESULTs.** `COMException (0x800A03EC)` (Excel busy with an OLE action)
-and `COMException (0x80010105)` (server threw an exception) are different faults with different
-fixes. Normalizing `0x…` to `<ADDR>` merged them. COM errors are common in RPA precisely because RPA
-drives Office and legacy desktop apps through that interface. Fixed: match bare addresses narrowly,
-never touch `ExceptionName (0x…)`.
-
-**3. CRLF rode into the hash.** `split("\n")` strands `\r` on every line, and a regex capturing to
-end-of-line captures it, so the hashed message was `"…boom\r"`. The same failure read on two
-platforms fingerprinted differently. Fixed: normalize line endings before anything else.
-
-The pattern is worth noting: the earlier generated fixtures were *too clean*, so they exercised the
-mechanism but not the format. Realistic mess is where parser bugs live.
+The logs deliberately carry what real logs carry and tidy examples do not: CRLF endings, .NET inner
+exception chains, retries logged as WARN before the final ERROR, a rotation elision marker, and
+Selenium's `(Session info: chrome=…)` trailer.
 
 ---
 
-## What would make these obsolete
+## What these changed in the design
 
-**One real log file, sanitized by hand, reviewed before it leaves the estate**
-(`OPEN_QUESTIONS.md` D1). One file, once — the permitted exception in `SECURITY.md` §11.
+### The Chrome-update problem — the most serious finding so far
 
-The specific things it would settle, none of which can be guessed:
+Selenium appends the browser build to **every** exception message:
 
-1. Timestamp format, log level names, and whether there is a thread or component field
-2. Whether stack traces are present at all, and in .NET format
-3. How the screenshot filename relates to the log's run ID — **the pairing question**
-   (`OPEN_QUESTIONS.md` D5), which decides whether screenshots can be attached reliably
-4. Whether retries appear as separate log lines or only as a final count
-5. Encoding — UTF-8, UTF-16, or a Windows code page
+```
+stale element reference: element is not attached to the page document
+  (Session info: chrome=128.0.6613.120)
+```
 
-Item 3 is the one with a design consequence rather than a parsing consequence. The rest change
-regexes; that one changes whether the vision input works.
+Chrome auto-updates roughly every four weeks. Without a rule to drop that trailer, **the morning
+after an estate-wide rollout every fingerprint changes at once** — the dedup cache goes cold for
+every bot simultaneously, and it recurs every month forever.
+
+A cold cache is **3.3×** the warm cost: at 2,000 failures/day, $16.63/day becomes $55.43/day until
+it re-warms. And it is silent — analyses stay correct, only the bill moves.
+
+Fixed by dropping the trailer and normalizing version strings *before* the integer rule (otherwise
+`128.0.6613.120` half-mangles into `128.0.<NUM>.120`, which still differs between builds).
+
+### Pixel coordinates fragment too
+
+`is not clickable at point (642, 318)` varies with window size, so the same overlay bug on two
+differently-sized screens fingerprinted differently. Normalized to `at point (<X>,<Y>)`. The
+diagnostic part — *which* element intercepted the click — is kept.
+
+### Earlier findings, from the first round of samples
+
+- **Fingerprinting the outer exception type.** `WebDriverTimeoutException ---> NoSuchElementException`
+  would have keyed on the wrapper. Fixed by unwrapping the chain (`DATA_MODEL.md` §2.2a).
+- **The `0x…` rule destroyed HRESULTs**, merging distinct COM faults.
+- **CRLF rode into the hash**, so one failure fingerprinted differently across platforms.
+
+### One judgement call worth revisiting
+
+`StaleElementReferenceException` is classified **text-only**, not a vision case, even though it is a
+UI exception. By the time the screenshot is taken the page has re-rendered, so the image shows a
+state that looks perfectly healthy and can actively mislead the diagnosis. If pilot feedback shows
+developers wanting the screenshot here anyway, that is cheap to change — `COST_MODEL.md` §6.
+
+---
+
+## Still unknown
+
+1. **Does the real log record the screenshot filename?** These samples log `Screenshot captured`
+   with a timestamp only, matching the date-time filenames. If the real log names the file, pairing
+   becomes exact and the refusal rule in `ARCHITECTURE.md` §4.4 stops mattering.
+2. **Real timestamp format, log level names, and encoding** (UTF-8 vs UTF-16 vs a code page).
+3. **Whether a failing run stops at the first error** or catches per item and continues. The sample
+   processes rethrow, so one run produces one screenshot — if real ones continue, screenshots arrive
+   in bursts and timestamp pairing gets much harder.
+
+One real log file, sanitized by hand and reviewed before it leaves the estate, answers all three
+(`OPEN_QUESTIONS.md` D1; the permitted exception in `SECURITY.md` §11).

@@ -59,7 +59,7 @@ what you inherited.
 
 | # | Question | Assumed | Ask |
 |---|---|---|---|
-| ⚪ C1 | ~~Which RPA platform?~~ **Settled: iBot only.** No adapter framework is built. | — | — |
+| ⚪ C1 | ~~Which RPA platform?~~ **Settled: iBot only**, C#/.NET + Selenium + some JavaScript. Web automation, not desktop. | — | — |
 | 🟡 C2 | Which 5–8 bots, and which 5–8 developers? | Not selected | PO |
 | 🟡 C3 | What is the current MTTR baseline? **Has it ever been measured?** | Unknown — **must be captured before go-live or no improvement can be claimed** | PO |
 | 🟡 C4 | Does "bot ownership" exist as data in iBot, or is it tribal knowledge? | Exists and is accurate — **frequently false in practice; routing depends on it** | iBot team / RPA ops |
@@ -86,8 +86,11 @@ The share layout is known:
 — which gives service line, bot number and date structurally, with no content parsing. What remains
 is what happens *inside* a date folder.
 
-| 🔴 D5 | **How are a log and its screenshot paired inside one date folder** — shared run ID in the filename, a reference in the log body, or timestamp proximity only? | Shared run ID — **if it is timestamp proximity, concurrent failures on one bot will mismatch and we must refuse to attach rather than guess (`ARCHITECTURE.md` §4.4)** | iBot team |
+| ✅ D5 | ~~How are a log and its screenshot paired?~~ **Answered: timestamp only** — filenames are `2026-09-11_09-41-09.png`, no run ID. Pairing rule and refusal-on-ambiguity in `ARCHITECTURE.md` §4.4. | — | — |
+| 🟡 D5a | **Does the log line record the screenshot filename?** If so, pairing is exact and the refusal rule stops mattering. | No — timestamp only | iBot team |
+| 🟡 D5b | **Does a failing run stop at the first error, or catch per item and continue?** Continuing produces bursts of screenshots and makes timestamp pairing much harder. | Stops at first error | iBot team |
 | 🔴 D7 | **How does `bot_number` map to a file in the code folder?** Exact name, prefix, per-service-line subfolder? | `{bot_number}.txt` — needs confirming | PO / RPA ops |
+| 🟡 D10 | **Is browser version pinned, or does Chrome auto-update on the bot VMs?** Auto-update is handled by normalization now, but a pinned fleet also removes a class of `SessionNotCreatedException` failures. | Auto-updates | RPA ops / IT |
 | 🟡 D1 | What is iBot's log format and rotation policy? | Text, one file per run | iBot team |
 | 🟡 D2 | Screenshot format and resolution as written today? | PNG, full desktop resolution | iBot team |
 | 🟡 D3 | **Will iBot capture only the failing window instead of the full desktop?** | Not today — an ask, not a constraint. Under Mode 0 this is now an efficiency and Modes 1–2 question, no longer a blocker. | iBot team |

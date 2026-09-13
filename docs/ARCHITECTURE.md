@@ -232,26 +232,46 @@ survive restarts, because the jump server is logged out routinely. On startup th
 from the watermark rather than starting from now — without this, every overnight failure is lost the
 first time nobody logs in.
 
-### 4.4 Correlation, and the part that is still unknown
+### 4.4 Correlation — timestamp only, confirmed
 
-Log and screenshot sit in **sibling folders under the same date**, so they are already narrowed to
-one bot on one day. What is not yet known is how to pair a *specific* log with a *specific*
-screenshot inside that day.
+Screenshot filenames carry **a date and time and nothing else**:
 
-Three possibilities, in descending reliability:
+```
+2026-09-11_09-41-09.png
+2026-09-11_10-02-51.png
+2026-09-11_10-03-04.png
+```
 
-1. **A shared run ID in both filenames** — exact, trivial, no ambiguity. Best case.
-2. **A run ID inside the log body** that names its screenshot — also exact, needs parsing.
-3. **Timestamp proximity only** — fragile. Two failures on one bot within the pairing window get
-   mismatched, and a mismatched screenshot produces an analysis of the wrong screen presented with
-   full confidence. That is the "confidently wrong" failure mode this project cannot afford.
+There is no run ID, so pairing is the fragile case flagged in earlier drafts. It is workable, but
+only with explicit guard rails.
 
-If it turns out to be (3), the rule is: pair only within a tight window (default 5s), and where two
-candidates fall inside the window, **attach no screenshot and mark the failure text-only.** Refusing
-to guess is cheap; guessing wrong is expensive.
+**What makes it workable:** the log records the capture with its own timestamp
+(`09:41:09.402 [INFO] Screenshot captured`), and both are written by the same process moments apart.
+Matching the filename's timestamp to that log line is precise to the second.
 
-**To settle this I need one real directory listing** — a `dir /s` of one date folder, filenames only,
-plus one sample log file with client data removed. That resolves in minutes what discussion cannot.
+**What makes it risky:** nothing in the filename identifies the run. Two failures close together on
+one bot produce two screenshots that only the clock distinguishes — and a mismatched screenshot
+yields an analysis of the wrong screen, stated with full confidence. That is the failure mode this
+project can least afford.
+
+**The rule:**
+
+1. Find the `Screenshot captured` line in the log and take its timestamp `T`.
+2. Consider screenshots in that date folder with a filename timestamp in `[T − 2s, T + 10s]`
+   (asymmetric: the file is written *after* the log line, never meaningfully before).
+3. Exactly one candidate → attach it, `pairing_method = 'timestamp'`.
+4. More than one → **attach nothing.** Analyse text-only and record `pairing_method = 'none'`.
+5. No `Screenshot captured` line → attach nothing.
+
+Rule 4 is the important one. **Refusing to pair is cheap; pairing wrongly is not.** Track the
+refusal rate as a metric — if it is more than a few percent, that is the evidence for asking the
+iBot team to put the run ID in the filename, which would make this exact.
+
+One thing that reduces the risk in practice: the sample processes rethrow from `OnError`, so a run
+terminates at its first failure. One failure per run means one screenshot per run, and consecutive
+runs are usually seconds to minutes apart rather than milliseconds. **Verify this holds** — a
+process that catches per-item and continues would produce a burst of screenshots and push the
+refusal rate up sharply.
 
 ### 4.5 Code, and the drift problem
 

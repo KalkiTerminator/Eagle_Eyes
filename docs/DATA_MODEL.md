@@ -110,6 +110,9 @@ Two details that follow from real .NET output:
 
 | Pattern | Replacement |
 |---|---|
+| **Selenium `(Session info: …)` trailer** — appended to every WebDriver exception | **dropped entirely** |
+| **Dotted version strings** `128.0.6613.120` — before any integer rule | `<VER>` |
+| **Pixel coordinates** `at point (642, 318)` | `at point (<X>,<Y>)` |
 | ISO-8601 timestamps, epoch millis | `<TS>` |
 | UUIDs / GUIDs | `<UUID>` |
 | Hex runs ≥ 8 chars | `<HEX>` |
@@ -124,6 +127,34 @@ Two details that follow from real .NET output:
 | **Line endings — normalize CRLF → LF before anything else** | — |
 | Whitespace runs | single space |
 | Case | lowercased *after* all above |
+
+**Drop the Selenium session trailer, or a Chrome update resets the whole cache.**
+
+Every `OpenQA.Selenium.*` exception message carries a trailer naming the browser build:
+
+```
+stale element reference: element is not attached to the page document
+  (Session info: chrome=128.0.6613.120)
+```
+
+Chrome auto-updates roughly every four weeks. Without this rule, **the morning after a rollout every
+fingerprint in the estate changes at once** — the dedup cache is cold for every bot simultaneously,
+and it happens again every month, forever. Measured against the cost model, a cold cache is **3.3x**
+the warm cost: at 2,000 failures/day, $16.63 becomes $55.43 per day until it re-warms.
+
+It would also be invisible. The analyses stay correct; only the bill moves. The `dedup_hit_rate`
+alert (`COST_MODEL.md` §9) is what would eventually catch it, which is precisely why that alert is
+the highest-value one in the list.
+
+The same applies to any dotted version string, and to Selenium's session GUIDs and ChromeDriver port
+numbers elsewhere in the log. **Normalize versions before the integer rule** — otherwise
+`(?<!\d)\d{4,}(?!\d)` half-mangles `128.0.6613.120` into `128.0.<NUM>.120`, which still differs
+between builds and is now unreadable as well.
+
+**Normalize pixel coordinates.** `is not clickable at point (642, 318)` varies with window size and
+page layout, so the same overlay bug on two differently-sized screens fingerprints differently. The
+coordinates carry no diagnostic value the screenshot does not carry better — the identity of the
+intercepting element, which Selenium also reports, is the part worth keeping.
 
 **Never normalize an HRESULT.** The blanket rule `0x[0-9A-Fa-f]+ → <ADDR>` looks harmless and
 destroys the single most diagnostic token in a COM failure. `COMException (0x800A03EC)` (Excel busy
