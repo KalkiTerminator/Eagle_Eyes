@@ -40,6 +40,16 @@ Assets, ranked by damage on exposure:
 | T7 | PII leaks into our own application logs | Careless error logging | **High** | High | Structured logging with allowlisted fields only |
 | T8 | Screenshot reaches a mailbox | Image embedded in notification | Med | High | Hard rule: notifications link, never embed |
 | T9 | Quarantine bucket readable by wrong role | IAM drift | Low | Critical | Boot-time policy assertion; IaC; periodic check |
+| **T10** | **Emitter on every bot VM becomes new attack surface** | Software we wrote runs estate-wide with disk read access | Med | High | Minimal dependencies; read-only to iBot's output dir; no inbound listener; signed releases; pinned versions |
+| **T11** | **Per-VM credential stolen, forged events injected** | Credential lives on a bot VM we do not fully control | Med | Med | Per-VM scoped identity (submit-only, no read); short-lived credentials; anomaly alerting on volume or unknown `bot_id` |
+| **T12** | **Emitter reads beyond iBot's output directory** | Bug or compromise widens file access | Low | High | Path allowlist; runs as a dedicated low-privilege account, never as the bot's or an admin account |
+
+**T10–T12 are new, and they exist because of the iBot decision.** With a central Orchestrator we
+would have pulled data across one authenticated channel from one place. Pushing from every bot VM
+means our code, and a credential, now sit on hundreds of production machines. That is a materially
+larger attack surface than the previous draft carried, and the mitigations above are not optional
+extras — the per-VM identity must be submit-only, so that a stolen credential lets an attacker write
+noise but never *read* another team's failures or analyses.
 
 **T2 and T7 deserve more attention than they usually get.** T1 is the threat everyone names first,
 but it is a single well-guarded path. T2 is 150 developers using the system correctly every day
@@ -84,6 +94,18 @@ before submission.
   window). Loses surrounding context that sometimes matters. An error dialog can itself contain a
   customer name ("Could not save record for J. Smith, policy 40192").
 
+**Option C′ — iBot captures only the error region, at source.** Same as C, but the narrowing happens
+inside iBot at capture time rather than server-side after upload.
+
+- *For:* **strictly dominates C.** The full-desktop image is never written to disk, never leaves the
+  VM, never enters S3, and never needs deleting — so the 24-hour quarantine window, and the whole
+  class of "was the raw image really purged" questions, simply does not arise. iBot knows which
+  window raised the error, so the region is *known* rather than heuristically inferred.
+- *Against:* depends on the iBot team's roadmap, and only protects VMs running a new enough build —
+  so the server-side control must exist regardless, as the fallback.
+- **This option did not exist in the previous draft.** It is available only because iBot is
+  in-house. It is the largest security improvement the platform decision unlocked.
+
 **Option D — Send as captured, rely on platform terms.** Bedrock in-account, retention controls,
 DPA.
 
@@ -102,8 +124,8 @@ names, visible element tree) via the RPA tool's own accessibility APIs and send 
 
 ### 3.2 Recommendation
 
-**Ship in Mode 0 (Option A). Build the pipeline so Modes 1–3 are a config change. Pursue Mode 1
-(Option C, crop) as the first escalation, not Mode 2.**
+**Ship in Mode 0 (Option A). Build the pipeline so Modes 1–3 are a config change. Pursue Mode 1 as
+the first escalation, and pursue it as Option C′ — narrowing inside iBot — rather than Option C.**
 
 Reasoning:
 
@@ -112,11 +134,15 @@ Reasoning:
    captured, stored, and shown to the developer in the UI — so it still helps a human, which is
    most of its value today.
 
-2. **Crop before redact, when we do escalate.** Option C's guarantee is geometric and auditable —
-   "we sent these pixels and no others". Option B's guarantee is statistical — "our detector
+2. **Crop before redact, when we do escalate.** Option C/C′'s guarantee is geometric and auditable
+   — "we sent these pixels and no others". Option B's guarantee is statistical — "our detector
    believed it found all the PII". A control you can verify by looking at it beats a control that
-   depends on a model's recall. When someone asks "how do you know that image was clean?", Option C
-   has an answer and Option B has a confidence interval.
+   depends on a model's recall. When someone asks "how do you know that image was clean?", C has an
+   answer and B has a confidence interval.
+
+   **And prefer narrowing at source (C′).** The best answer to "could the full screenshot leak?" is
+   that a full screenshot was never captured. Because iBot is ours, that answer is available to us —
+   it would not have been with a vendor tool. Put it on the iBot roadmap in Phase 0.
 
 3. **Layer them rather than choosing.** The intended end state is crop *then* redact *then* submit:
    geometry narrows the surface, redaction cleans what survives, Bedrock keeps inference in-
@@ -129,8 +155,9 @@ Reasoning:
 
 **What I would defend to a VP and to the client:** we capture screenshots, encrypt them, tightly
 control who can look at them, and today we do not send them to any model. When we propose to, we
-will send a cropped region rather than a full screen, redacted, to an in-account endpoint, with
-sign-off recorded.
+will have iBot capture only the failing window rather than the whole desktop — so the surplus pixels
+are never collected in the first place — redact what remains, and send it to an in-account endpoint,
+with sign-off recorded.
 
 **What I would not defend:** "the redaction model catches the PII." It mostly does. Mostly is not a
 security control, and it is not what I want to be saying after an incident.
@@ -323,6 +350,13 @@ Take these as a list. Blocking ones are marked.
 - Q6 Which client-specific identifier formats must the scrubber cover? We need actual formats, and the scrubber is materially incomplete without them.
 - Q7 May bot source code be fetched by an automated service at all? Which repos are in scope?
 
+**iBot and the bot VMs** *(these are internal — the iBot team, not a vendor)*
+- **Q17** Will iBot narrow screenshot capture to the failing window (Option C′)? On what timeline? *This is the highest-value security change available to us and it is entirely within our own control.*
+- Q18 Is deploying our emitter to production bot VMs acceptable to security and IT, or must it be an iBot-native change? What review does new estate-wide software require?
+- Q19 What identity may a bot VM hold? Confirm submit-only scope — a bot VM must never hold a credential that can read failures or analyses.
+- Q20 Does iBot's screenshot capture ever include content from applications outside the bot's own session (other windows, other users)?
+- Q21 Are there bots whose screens must never be captured at all, needing a per-bot capture blocklist?
+
 **Platform and contract**
 - **Q8 [BLOCKING]** Do Bedrock's data-handling terms satisfy the client contract for processing client-derived data? Who confirms this in writing?
 - Q9 Which region must processing occur in? Any data-residency constraint?
@@ -336,7 +370,9 @@ Take these as a list. Blocking ones are marked.
 - Q15 Is a penetration test required before pilot, and what is its lead time?
 - Q16 What is the breach notification path if residual PII is found in a stored analysis?
 
-**Answer Q1, Q2, Q5, and Q8 before Phase 2 begins.** The rest can resolve during Phase 1 —
+**Answer Q1, Q2, Q5, Q8, and Q18 before Phase 2 begins.** Q18 joins the list because if
+estate-wide emitter deployment is refused, Phase 1 has no ingestion path at all and the whole
+delivery depends on the iBot team's release cycle. The rest can resolve during Phase 1 —
 Mode 0 is safe while they are open, which is the point of shipping in it.
 
 ---
@@ -367,3 +403,14 @@ The kit asked that these be called out rather than buried. In full:
 
 6. **Standard SQS, at-least-once delivery.** Bought: simplicity. Cost: an analysis may occasionally
    be computed twice. Not a security issue, noted for completeness.
+
+7. **Our code and a credential run on every production bot VM.** Bought: the only ingestion path
+   iBot's local-disk model allows. Cost: estate-wide attack surface (T10–T12) that a pull-based
+   design would not have had. Mitigation: submit-only per-VM identity, path-allowlisted read, no
+   inbound listener, low-privilege account. **Not fully mitigable** — it is the structural price of
+   iBot writing only to local disk, and it should be named as such when this goes to security.
+
+8. **The emitter swallows its own errors rather than failing loudly.** Bought: certainty that
+   telemetry cannot take a production bot down. Cost: emitter faults are quiet, so spool drops and
+   delivery failures must be surfaced through server-side gap detection (`ARCHITECTURE.md` §6),
+   not by trusting the agent to report its own health.

@@ -40,11 +40,27 @@ dedup work. Five hundred failures sharing a fingerprint share one analysis and c
 
 ## 2. Fingerprint scheme
 
+### 2.0 A dependency worth removing
+
+Everything in §2.3 below — the normalization regexes, the 4-digit integer heuristic, the
+"this is a guess, tune it in Phase 1" caveats — exists for one reason: we are reverse-engineering
+structure out of iBot's free-text log.
+
+**iBot is in-house.** If it emits the exception type, stack frames, activity name and code location
+as a structured JSON sidecar (`ARCHITECTURE.md` §3), the fingerprint reads fields instead of parsing
+prose, and this entire class of fragility disappears. Dedup is the system's primary cost control and
+its primary silent-failure risk; making it depend on regexes over log text when the tool writing
+that text is ours is a choice, not a constraint.
+
+The `failure.ibot_error` JSONB column exists to receive that metadata. Build §2.3's text path now
+because it is unblocked, but **treat structured emission as the target state**, and prefer the
+structured fields whenever they are present.
+
 ### 2.1 Inputs
 
 The fingerprint hashes a normalized tuple of:
 
-1. **Exception type**, fully qualified (`UiPath.Core.SelectorNotFoundException`)
+1. **Exception type**, fully qualified, as iBot reports it (e.g. `iBot.Core.ElementNotFoundException`)
 2. **Normalized error message** — first 200 chars after normalization
 3. **Top 5 stack frames**, each reduced to `module.function` — **line numbers dropped**
 4. **Code location** — `repo + file path + enclosing function` — **not line number**
@@ -57,7 +73,7 @@ The fingerprint hashes a normalized tuple of:
 | Timestamps | Every occurrence differs. |
 | Run / job / correlation IDs | Per-execution noise. |
 | Line numbers | A comment added above shifts every line; the failure is unchanged. |
-| Machine / VM name | Same failure on a different runner is the same failure. |
+| Machine / VM name | Same failure on a different bot VM is the same failure. Stored on the row for ops triage, never in the hash. |
 | Screenshot content | Images of the same failure differ pixel-wise (cursor, clock, window position). Perceptual hashing was considered and rejected: it adds a failure mode without improving a hit rate that text already captures well. |
 
 ### 2.3 Normalization rules, in order
@@ -194,9 +210,9 @@ CREATE TABLE developer (
 CREATE TABLE bot (
     id              BIGSERIAL PRIMARY KEY,
     external_id     TEXT NOT NULL,
-    source_platform TEXT NOT NULL
-        CHECK (source_platform IN ('uipath','automation_anywhere','blue_prism','generic')),
+    source_platform TEXT NOT NULL DEFAULT 'ibot' CHECK (source_platform = 'ibot'),
     name            TEXT NOT NULL,
+    vm_hostname     TEXT,
     team_id         BIGINT NOT NULL REFERENCES team(id),
     owner_dev_id    BIGINT REFERENCES developer(id),
     repo_url        TEXT,
@@ -204,6 +220,9 @@ CREATE TABLE bot (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (source_platform, external_id)
 );
+-- source_platform is retained with a single-value CHECK rather than dropped: iBot is the only
+-- platform today, and a one-line constraint change is cheaper than a migration if that stops
+-- being true. No adapter framework is built for it — see ARCHITECTURE.md §3.
 
 -- ---------- known patterns ----------
 
@@ -286,6 +305,11 @@ CREATE TABLE failure (
     code_commit_sha     TEXT,
     severity            TEXT CHECK (severity IN ('low','medium','high','critical')),
     correlation_id      UUID NOT NULL,
+    vm_hostname         TEXT,                 -- which VM produced it; ops triage, not authorization
+    emitter_kind        TEXT CHECK (emitter_kind IN ('ibot_native','sidecar')),
+    emitter_version     TEXT,                 -- for correlating bad data with an emitter release
+    spool_delay_ms      BIGINT,               -- occurred_at -> ingested_at gap; detects VM backlog
+    ibot_error          JSONB NOT NULL DEFAULT '{}',  -- structured metadata if iBot emits it
     platform_extras     JSONB NOT NULL DEFAULT '{}',
     content_expires_at  TIMESTAMPTZ NOT NULL,
     expires_at          TIMESTAMPTZ NOT NULL
@@ -295,6 +319,8 @@ ALTER TABLE analysis
     ADD CONSTRAINT fk_analysis_source_failure
     FOREIGN KEY (source_failure_id) REFERENCES failure(id);
 
+-- Emitters deliver at-least-once and retry after network failures; this makes retries free.
+CREATE UNIQUE INDEX idx_failure_idempotency ON failure (bot_id, run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX idx_failure_bot_time   ON failure (bot_id, occurred_at DESC);
 CREATE INDEX idx_failure_fingerprint ON failure (fingerprint_id, occurred_at DESC);
 CREATE INDEX idx_failure_status     ON failure (status) WHERE status IN ('pending','analyzing');

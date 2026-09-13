@@ -14,7 +14,10 @@ reviewer (part-time), **PO** you.
 |---|---|---|
 | Take `SECURITY.md` §9 to EXL security; get Q1, Q2, Q5, Q8 answered | PO | — |
 | Confirm Bedrock data-handling terms against the client contract, in writing | PO + Sec | — |
-| Choose the one RPA platform for pilot; confirm log and screenshot access | PO | — |
+| **Confirm bot VMs can reach an AWS endpoint over outbound HTTPS** — proxy, TLS inspection, firewall | DevOps + Network | 0.5 |
+| **Check for an existing approved agent on bot VMs** (CloudWatch, Fluent Bit, Splunk, SCCM) to extend instead of deploying ours | DevOps + IT | 0.5 |
+| **Open the iBot conversation:** capture narrowing, structured error metadata, native event POST | PO + iBot team | — |
+| Get iBot's log format, screenshot naming, and log↔screenshot correlation convention documented | PO + iBot team | — |
 | AWS account, VPC, Bedrock model access enabled in-region | DevOps | 0.5 |
 | Confirm SSO provider and the group structure driving authorization | PO + IT | — |
 | Identify 5–8 pilot bots and 5–8 pilot developers | PO | — |
@@ -22,10 +25,15 @@ reviewer (part-time), **PO** you.
 
 **Elapsed:** 2–4 weeks, mostly waiting on other people. Engineering effort ~1 week.
 
-**Dependencies:** EXL security, client contract owner, IT/cloud, RPA platform team.
+**Dependencies:** EXL security, client contract owner, IT/cloud/network, iBot team, RPA ops.
 
-**Exit:** Q1/Q2/Q5/Q8 answered; pilot bots named; AWS account with Bedrock access; baseline
-captured.
+**Exit:** Q1/Q2/Q5/Q8/Q18 answered; pilot bots named; AWS account with Bedrock access; baseline
+captured; **a confirmed network path from a bot VM to our endpoint**; iBot asks logged on their
+backlog with an owner.
+
+> **The network path is the new hard blocker.** iBot writes only to local disk, so if bot VMs cannot
+> reach our ingestion endpoint there is no ingestion path and no amount of design works around it.
+> Prove it with one VM and one curl in week one, before anything else is built.
 
 > **Phase 0 does not block Phase 1.** Mode 0 (`SECURITY.md` §3.3) is safe with every screenshot
 > question still open — that is what it is for. Start Phase 1 in parallel; only Phase 3 truly
@@ -41,7 +49,8 @@ scale — not a prototype with a pilot label.
 ### Scope
 
 **In:**
-- One platform adapter (the pilot platform only)
+- **Emitter (Option B sidecar): spool, backoff, resource ceiling, packaging, deployment** — the
+  largest new piece of work and the one with the least precedent
 - Ingestion, sanitization, fingerprinting, dedup
 - Triage (Haiku 4.5) + deep text analysis (Sonnet 5)
 - **Screenshots captured, encrypted, stored, viewable in UI — Mode 0, not sent to any model**
@@ -52,8 +61,8 @@ scale — not a prototype with a pilot label.
 - Audit logging, retention job
 - Structured logging, metrics, budget guard
 
-**Out:** other platforms, vision analysis, Teams integration, operations dashboard, digest mode,
-automated pattern learning.
+**Out:** vision analysis, Teams integration, operations dashboard, digest mode, automated pattern
+learning, Option A (iBot-native emission — tracked in parallel, not depended on).
 
 ### Effort
 
@@ -61,7 +70,8 @@ automated pattern learning.
 |---|---|---|
 | Repository foundation, CI, secret scanning | BE + DevOps | 1 |
 | Data layer, migrations, fingerprint + tests | BE | 2 |
-| Ingestion, sanitization, dedup, platform adapter | BE | 2.5 |
+| Ingestion API, sanitization, dedup | BE | 2 |
+| **Emitter: spool, retry, packaging, deployment, soak test on a real bot VM** | BE + DevOps | **3** |
 | Analysis engine, `model_gateway`, prompts | BE + PO | 2.5 |
 | API, SSO, authorization, audit | BE | 2 |
 | Notifications with suppression | BE | 1 |
@@ -70,7 +80,12 @@ automated pattern learning.
 | Security review + hardening | Sec + BE | 1.5 |
 | Pilot onboarding, runbook, docs | PO + BE | 1 |
 
-**Total ~18 person-weeks.** With 2 BE + 1 FE + 0.5 DevOps + 0.25 Sec: **7–9 calendar weeks.**
+**Total ~20 person-weeks.** With 2 BE + 1 FE + 0.5 DevOps + 0.25 Sec: **8–10 calendar weeks.**
+
+Two weeks more than the multi-platform draft, and the shape of the risk has moved. Dropping to one
+platform saved adapter work; pushing from VMs cost more than that back. The emitter is the riskiest
+item in Phase 1 — it runs on production machines we do not own, its failure modes are remote and
+quiet, and every release goes through change control.
 
 This is "weeks, not months" only with that team. With one engineer it is four to five months, and
 the pilot should be cut harder rather than run that long — drop notifications and the UI feed, and
@@ -119,7 +134,6 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 
 ### Scope
 
-- Remaining platform adapters
 - Teams/Slack integration
 - Operations dashboard
 - Digest mode and per-developer rate caps
@@ -129,7 +143,8 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 
 | Workstream | Roles | Weeks |
 |---|---|---|
-| Additional platform adapters | BE | 1.5 per platform |
+| **Emitter rollout to the full estate** (staged rings, monitoring, rollback) | DevOps + BE | 2 |
+| **Migrate to Option A** if iBot ships native emission | BE + iBot team | 1 |
 | Chat integration | BE | 1 |
 | Operations dashboard | FE + BE | 2.5 |
 | Digest + rate caps | BE | 1 |
@@ -137,7 +152,7 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 | Load testing and scaling | DevOps + BE | 1.5 |
 | Onboarding at scale | PO | 1 |
 
-**Total ~10–13 person-weeks → 5–6 calendar weeks.**
+**Total ~11–14 person-weeks → 5–7 calendar weeks.**
 
 **Gate:** do not enter Phase 3 without Phase 1 evidence (§ *Go/no-go* below). Rolling a system
 developers do not trust out to 150 people converts a small problem into an organization-wide one.
@@ -165,18 +180,34 @@ Phase 1 with nothing consuming it is deliberate — the data has to exist before
 
 | Dependency | Needed by | Owner | Risk if late |
 |---|---|---|---|
+| **Network path: bot VM → AWS endpoint** | **Phase 1** | Network / IT | **No ingestion path at all. Hard blocker — prove it in week one.** |
+| **Approval to deploy the emitter estate-wide** | **Phase 1** | Security + IT | Forces dependence on iBot's release cycle for Option A |
+| **iBot: log format + correlation convention** | Phase 1 | iBot team (internal) | Emitter cannot correlate log to screenshot reliably |
+| iBot: structured error metadata | Phase 1 quality | iBot team (internal) | Fingerprint stays regex-based and fragile |
+| iBot: capture narrowing (Option C′) | Phase 2 | iBot team (internal) | Falls back to server-side crop — weaker, still workable |
+| Software deployment mechanism to bot VMs | Phase 1 | IT / RPA ops | Every emitter release becomes slow and manual |
 | Security answers Q1, Q2 | Phase 2 | EXL Security | Phase 2 slips; Phase 1 unaffected |
 | Security answers Q5, Q8 | **Phase 1** | EXL Security + contract | **Blocks Phase 1** |
 | Client-specific PII formats (Q6) | Phase 1 | Client / engagement lead | Scrubber ships incomplete |
 | AWS account + Bedrock access | Phase 1 | IT / Cloud | Blocks all development |
 | SSO app registration | Phase 1 API | IT / Identity | API ships without auth — unacceptable, would block pilot |
-| Repo read access for bot code | Phase 1 | RPA platform team | Degrades to log-only analysis |
+| Repo read access for bot code | Phase 1 | iBot team / RPA ops | Degrades to log-only analysis, or code ships in the envelope |
 | Mail relay / SES approval | Phase 1 notify | IT | Dry-run mode only |
 | Pilot bot + developer selection | Phase 1 | PO | Blocks pilot start |
 | Client notification (Q11) | Pilot go-live | Contract owner | Legal exposure |
 | Penetration test (Q15) | Phase 3 | Security | Blocks estate rollout |
 
-**Q5 and Q8 are the two that can stop Phase 1.** Q5 (unscrubbed names in logs) and Q8 (do Bedrock
+**The dependency profile changed with iBot.** Previously the critical path ran through EXL Security.
+It now runs through **IT and Network** — the path from a bot VM to our endpoint, and permission to
+put software on production VMs. Neither is a design question and neither can be worked around;
+both should be settled in week one.
+
+The compensating gain: several things that would have been vendor constraints are now internal
+roadmap items with a colleague's name on them (`ARCHITECTURE.md` §3). Push on them early — the
+iBot team needs lead time, and capture narrowing in particular is the best security improvement
+available to this project.
+
+**Q5 and Q8 remain the two security answers that can stop Phase 1.** Q5 (unscrubbed names in logs) and Q8 (do Bedrock
 terms satisfy the contract) affect text processing, which Mode 0 does not avoid. Chase these two
 first — they are on the critical path in a way the screenshot questions are not.
 
@@ -193,8 +224,8 @@ P3                                      [============]
 P4                                                  [==========]
 ```
 
-Assumes the team above and that Q5/Q8 answer inside three weeks. **The dominant schedule risk is
-security response time, not engineering.** Phase 0 starting on day one is the highest-leverage
+Assumes the team above and that Q5/Q8 answer inside three weeks. **The dominant schedule risks are
+now network/IT approval and emitter rollout, with security response close behind.** Phase 0 starting on day one is the highest-leverage
 thing available.
 
 ---

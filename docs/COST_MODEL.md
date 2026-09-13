@@ -47,6 +47,11 @@ Sonnet 5 supports high-resolution vision up to **2576 px on the long edge**. We 
 A 1280×720 downscale is legible for error dialogs and UI state, and costs a fifth of full
 resolution.
 
+**Capture at the target size rather than downscaling after the fact.** iBot writes the screenshot,
+and iBot is ours — having it capture the failing window at 1280×720 means we never store, ship, or
+process the surplus pixels. That saves VM disk and estate bandwidth as well as tokens, and it is the
+same change `SECURITY.md` §3.1 Option C′ wants for privacy reasons. One ask, two payoffs.
+
 **Verify the formula empirically in Phase 1.** `count_tokens` on representative screenshots, and
 log `image_tokens` on every vision call so the assumption is checked against reality rather than
 carried forward on faith. The constant has changed across model generations before.
@@ -140,7 +145,7 @@ Full scheme in `DATA_MODEL.md` §2. Cost-relevant properties:
 
 | Regime | Expected hit rate | Reasoning |
 |---|---:|---|
-| Steady state | **65–80%** | RPA failures are dominated by recurring causes: selector drift after a UI update, credential expiry, locked files, application timeouts. The long tail of genuinely novel failures is thin. |
+| Steady state | **65–80%** | RPA failures are dominated by recurring causes: selector drift after a UI update, credential expiry, locked files, application timeouts. The long tail of genuinely novel failures is thin. A single platform (iBot) means one log format and one exception vocabulary, which should push this toward the upper end — multi-platform estates fragment the fingerprint namespace. |
 | Infrastructure incident | **>99%** | Hundreds of failures within minutes sharing one root cause and one fingerprint. |
 | First week of pilot | **~0–20%** | Cache is cold. Every failure is novel. Expect the first week's cost to look alarming and then fall sharply — say so in advance so nobody panics. |
 
@@ -247,6 +252,11 @@ Funnel per 100 failures ingested: 70 dedup hits ($0) → 30 triaged → 4.5 nois
 | SQS, KMS, Secrets Manager | ~$8 |
 | CloudWatch logs, metrics, alarms | ~$30 |
 | **Total** | **~$283** |
+
+The emitter adds no AWS cost — it runs on bot VMs that already exist. Its cost is **operational, not
+financial**: packaging, signing, estate-wide deployment, and change control on every release. Budget
+that as engineering time in `ROADMAP.md`, not as infrastructure spend. It is the main reason Option A
+(iBot emits natively) is worth pursuing even though Option B is cheaper to start.
 
 ### Combined
 

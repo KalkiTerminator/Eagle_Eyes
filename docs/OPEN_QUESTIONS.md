@@ -37,9 +37,12 @@ what you inherited.
 |---|---|---|---|
 | 🔴 B1 | Is an AWS account available with Bedrock enabled in the target region? | Yes | Cloud/IT |
 | 🔴 B2 | Which SSO provider, and who owns the groups driving authorization? | Entra ID, team-mapped groups | IT/Identity |
-| 🟡 B3 | Can a service read bot source from version control? Which repos? | Yes, read-only service account | RPA platform team |
-| 🟡 B4 | Is RPA source actually *in* version control, or only in the tool's repository? | In git | RPA platform team |
-| 🟡 B5 | Can we deploy a collector agent to bot VMs, or must ingestion be pull-only? | Pull-only preferred; agent possible with change control | IT/RPA ops |
+| 🔴 B3 | **Can bot VMs reach an AWS endpoint over outbound HTTPS?** Proxy? TLS inspection? | Yes, via corporate proxy — **unverified, and if no there is no ingestion path** | Network / IT |
+| 🔴 B4 | **May we deploy the emitter to production bot VMs?** What review does estate-wide software need? | Yes with change control | Security + IT |
+| 🔴 B5 | **Is an approved agent already on these VMs** (CloudWatch, Fluent Bit, Splunk, SCCM) we could extend? | No — **checking this first could remove the largest piece of Phase 1 risk** | DevOps / IT |
+| 🟡 B5a | How is software deployed and updated on bot VMs? Change-control lead time? | SCCM-style push, weeks per release | IT / RPA ops |
+| 🟡 B5b | What CPU/memory headroom exists on a bot VM? | Enough for a small agent — **must be confirmed; the emitter shares a VM with production work** | RPA ops |
+| 🟡 B3a | Where does iBot bot source live — version control, central store, or only on the VM? | In git — if actually on-VM, code ships in the envelope instead | iBot team |
 | 🟡 B6 | Mail relay — SES, or an internal relay? Approval needed? | SES with verified domain | IT |
 | 🟡 B7 | Teams or Slack? Can we register an app/webhook? | Teams, Phase 3 | IT |
 | 🟡 B8 | Is there an existing SIEM that must receive audit events? | No — audit in Postgres | Security ops |
@@ -54,10 +57,10 @@ what you inherited.
 
 | # | Question | Assumed | Ask |
 |---|---|---|---|
-| 🔴 C1 | Which RPA platform is the Phase 1 pilot on? | Highest-volume platform; one adapter only | PO |
+| ⚪ C1 | ~~Which RPA platform?~~ **Settled: iBot only.** No adapter framework is built. | — | — |
 | 🟡 C2 | Which 5–8 bots, and which 5–8 developers? | Not selected | PO |
 | 🟡 C3 | What is the current MTTR baseline? **Has it ever been measured?** | Unknown — **must be captured before go-live or no improvement can be claimed** | PO |
-| 🟡 C4 | Does "bot ownership" exist as data, or is it tribal knowledge? | Exists and is accurate — **frequently false in practice; routing depends on it** | RPA platform team |
+| 🟡 C4 | Does "bot ownership" exist as data in iBot, or is it tribal knowledge? | Exists and is accurate — **frequently false in practice; routing depends on it** | iBot team / RPA ops |
 | 🟡 C5 | What are the actual top failure categories? Needed to seed templates. | Selector failures, credential expiry, file/IO, timeouts | Pilot developers |
 | 🟡 C6 | What accuracy makes this worth using, in developers' own judgement? | ≥70% correct-or-partial | Pilot developers |
 | ⚪ C7 | Should the system ever attempt an automated fix, or only advise? | **Advise only.** Automated remediation is a different risk class and a different product. | PO |
@@ -72,12 +75,19 @@ what you inherited.
 
 | # | Question | Assumed | Ask |
 |---|---|---|---|
-| 🔴 D1 | Where do execution logs actually live per platform, and how are they read? | Mixed — local text files, Orchestrator API, file share | RPA platform team |
-| 🟡 D2 | Where are error screenshots written, and in what format/resolution? | PNG to a local or shared path, full desktop resolution | RPA platform team |
-| 🟡 D3 | **Can the RPA tool capture only the error dialog rather than the full screen?** | No — assumed full screen | RPA platform team |
-| 🟡 D4 | How do we map a log entry to the exact code location? Stack trace, or inference? | Stack trace includes workflow file and activity | RPA platform team |
-| 🟡 D5 | Can we correlate the three inputs reliably by run ID? | Yes, shared run/job ID | RPA platform team |
-| 🟡 D6 | How long do logs and screenshots survive on the VM before we collect them? | ≥24h | RPA ops |
+**Everything below is now an internal conversation with the iBot team, not a vendor.** That is the
+biggest practical change from the platform decision: most of these are answerable, and several are
+*changeable*.
+
+| 🔴 D1 | What is iBot's log format, path convention, and rotation policy? | Text files in a per-run directory | iBot team |
+| 🔴 D5 | **How are a log and its screenshot correlated on disk** — shared run ID, filename convention, or timestamp proximity? | Shared run ID — **timestamp proximity would be fragile and would argue hard for Option A** | iBot team |
+| 🟡 D2 | Screenshot format and resolution as written today? | PNG, full desktop resolution | iBot team |
+| 🟡 D3 | **Will iBot capture only the failing window instead of the full desktop?** | Not today — **an ask, not a constraint; best security win available (`SECURITY.md` §3.1 C′)** | iBot team |
+| 🟡 D3a | **Will iBot emit structured error metadata (exception, stack, activity, code location) as a JSON sidecar?** | Not today — **removes the fingerprint's biggest fragility (`DATA_MODEL.md` §2.0)** | iBot team |
+| 🟡 D3b | Will iBot POST the failure event itself (Option A)? On what timeline? | Not today; Option B bridges | iBot team |
+| 🟡 D4 | Does the log carry a stack trace and code location, or must we infer it? | Yes, includes activity and location | iBot team |
+| 🟡 D6 | How long do logs and screenshots survive on the VM before rotation deletes them? | ≥24h — **sets how long the emitter's spool has to recover from an outage** | iBot team / RPA ops |
+| 🟡 D6a | Does iBot ever capture windows outside the bot's own session? | No | iBot team |
 | ⚪ D7 | Are there bots whose screens are categorically too sensitive to capture at all? | Assumed none — **likely false; some client screens may need a blocklist** | PO + Security |
 | ⚪ D8 | Volume — what is the *actual* current failure rate per day? | 100–2,000 range assumed | RPA ops |
 | ⚪ D9 | Do failures cluster per bot within minutes? (Decides whether prompt caching pays — `COST_MODEL.md` §4.2) | Unknown; projections assume no benefit | Measure in Phase 1 |
@@ -108,6 +118,16 @@ Things I decided because there was no one to ask. Each is a place the design cou
 10. **No multi-tenancy beyond team-level authorization.** Assumes one client engagement. If this
     serves multiple clients, the data model needs a tenant boundary and **that is a rewrite, not
     an addition** — ask before Phase 1 if there is any chance of it.
+
+13. **The emitter can run on a bot VM without disturbing the bot.** Assumes spare CPU, memory and
+    disk, and that security accepts new estate-wide software. Unverified on both counts (B4, B5b).
+14. **A 500 MB spool is enough to ride out an outage.** A guess. Depends on failure volume per VM
+    and outage length; tune once real rates are known.
+15. **Log and screenshot can be correlated on disk without iBot's help.** If correlation is only by
+    timestamp proximity, the sidecar will mismatch them under load and Option A becomes mandatory
+    rather than preferred (D5).
+16. **iBot's log format is stable across versions.** If it drifts between releases, the fingerprint's
+    normalization breaks silently — exactly the failure `DATA_MODEL.md` §2.5 versioning is for.
 11. **English-language logs and screenshots.** OCR and PII detection are language-sensitive. If
     client applications are non-English, redaction quality drops sharply.
 12. **Screenshots are PNG at desktop resolution.** Drives the downscale and token math.
@@ -118,18 +138,26 @@ Things I decided because there was no one to ask. Each is a place the design cou
 
 If bandwidth allows only a handful:
 
-1. **A4** — do Bedrock's terms satisfy the client contract? *Blocks everything. Nothing else
-   matters if this is no.*
-2. **A3** — are unscrubbed names in logs acceptable? *Blocks Phase 1; unlike the screenshot
+1. **B3** — can a bot VM reach an AWS endpoint over HTTPS? *New top of the list. iBot writes only
+   to local disk, so this is the entire ingestion path. If it is no, nothing else in the plan
+   matters. Prove it with one VM and one curl — an afternoon, not a workstream.*
+2. **A4** — do Bedrock's terms satisfy the client contract? *Blocks everything downstream of
+   ingestion. Must be read, not recalled.*
+3. **A3** — are unscrubbed names in logs acceptable? *Blocks Phase 1; unlike the screenshot
    questions, Mode 0 does not route around it.*
-3. **C3** — what is the MTTR baseline, and has anyone measured it? *Cannot be captured
+4. **C3** — what is the MTTR baseline, and has anyone measured it? *Cannot be captured
    retroactively. Miss this window and the pilot cannot demonstrate value no matter how well it
    works.*
-4. **C1 / D1** — which platform, and how do we actually read its logs? *Determines the first
-   adapter, which is on the Phase 1 critical path.*
-5. **A1** — may screenshots go to a model? *Not blocking Phase 1 by design, but the earliest
-   answer gives Phase 2 the longest runway.*
+5. **B4 / B5** — may we deploy the emitter, and is there already an agent we could extend instead?
+   *Decides whether Phase 1's largest workstream exists at all.*
 
-**C3 is the one most likely to be skipped and most expensive to skip.** It is the only question
-here with a hard deadline attached to the physics of measurement: once the system is live, the
-before-state is gone forever.
+**And start the iBot conversation this week even though it is not on this list** (D3, D3a, D3b).
+Those are asks to a colleague rather than blockers, but they need lead time, and two of them —
+capture narrowing and structured error metadata — are the best available improvements to the
+security posture and to dedup reliability respectively. They were not even askable when the plan
+assumed a vendor tool.
+
+**C3 remains the one most likely to be skipped and most expensive to skip.** It is the only question
+here with a deadline set by the physics of measurement: once the system is live, the before-state is
+gone forever.
+
