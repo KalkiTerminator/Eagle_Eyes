@@ -159,7 +159,7 @@ An infrastructure incident produces 500 failures in two minutes, nearly all shar
 Failure #1 pays full price (~$0.045). Failures #2–500 hit the fingerprint index and cost **$0**. No
 queue message, no worker, no model call. Total incident model cost: **$0.045**.
 
-Cost during a spike is flat, not linear. `ARCHITECTURE.md` §6 and the Phase 1 load test must prove
+Cost during a spike is flat, not linear. The Phase 3 load test (`ROADMAP.md`) must prove
 this rather than assume it.
 
 ---

@@ -108,7 +108,7 @@ rules change, the version increments and old fingerprints stop matching new ones
 This matters more than it sounds. Without it, a tweak to a normalization rule silently splits the
 dedup namespace: hit rate collapses, cost spikes, and nothing in the system says why. With it, the
 change is visible, the old analyses remain queryable, and the `dedup_hit_rate` alert
-(`ARCHITECTURE.md` §6 / `COST_MODEL.md` §6) fires against a known cause.
+(`COST_MODEL.md` §9) fires against a known cause.
 
 Dedup only matches within the same `fingerprint_version`.
 
