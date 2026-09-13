@@ -15,6 +15,9 @@ Planning uses Anthropic first-party list rates as a proxy:
 | Claude Sonnet 5 (`claude-sonnet-5`) | $2.00 | $10.00 | Deep analysis |
 | Claude Opus 5 (`claude-opus-5`) | $5.00 | $25.00 | Not used; listed for comparison |
 
+**Which backend you use changes the rates.** The table above is Anthropic first-party list pricing,
+so it is exact for `byok` and a proxy for `bedrock`.
+
 **Amazon Bedrock is partner-operated and priced separately.** These numbers are a planning proxy,
 not a quote. Before any figure here goes in front of finance, re-derive it from
 <https://aws.amazon.com/bedrock/pricing/> for your region. On Bedrock the model IDs carry an

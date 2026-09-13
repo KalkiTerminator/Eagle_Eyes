@@ -471,3 +471,70 @@ sanitized by hand and reviewed before it leaves the estate, to establish the rea
 screenshots, which are never exported for development under any circumstances.
 
 Full guidance in `LOCAL_DEV.md`.
+
+
+---
+
+## 12. Choosing a model backend
+
+Two are supported, and **the choice is a data-governance decision, not a configuration
+convenience.**
+
+| | `bedrock` | `byok` |
+|---|---|---|
+| Where inference runs | The client's own AWS account and region | Anthropic's API |
+| From the client's view | Inside their tenancy | **A third party** |
+| Credential | AWS IAM role or keys | An Anthropic API key |
+| Approval needed for client data | The contract question in §9 Q8 | **Everything in Q8, plus a new third-party recipient** |
+| Pricing | Partner-operated, separate rates | Anthropic list rates |
+
+### Why `byok` exists
+
+It is genuinely useful in two situations, and both are real:
+
+- **Development against synthetic data.** No client data is involved, so no governance question
+  arises. A personal key and the sandbox estate get prompt work moving without waiting on anyone.
+- **A client who has no Bedrock, or whose Bedrock is not reachable from where the analyzer runs.**
+  Better a working system on an approved key than no system.
+
+### Why it is guarded
+
+`bedrock` was chosen (`ARCHITECTURE.md` §5) largely because keeping inference inside the client's
+own account is the strongest available answer to "where does client data go" — the question this
+entire document is built around. `byok` gives a different answer.
+
+So the backend cannot quietly become `byok` in a production profile. Outside local development the
+gateway **refuses to start** unless `model.byok_approved_by` names a person. That is not a technical
+control — anyone editing config can write a name — and it is not meant to be. It exists so the
+decision is **deliberate and attributable** rather than a line someone changed on a Friday, and so
+the name is there in config review when somebody asks who agreed to it.
+
+```yaml
+model:
+  backend: byok
+  byok_approved_by: "J. Okafor, EXL Security, ticket SEC-4471"
+```
+
+### If `byok` is used with real client data
+
+Everything in §9 still applies, and these are additional:
+
+- **Q24** Has the client agreed to this specific third-party recipient, by name, in writing?
+- **Q25** Whose Anthropic account, under whose terms? A personal key on a corporate jump server
+  makes an individual the data controller's counterparty, which is very unlikely to be intended.
+- **Q26** Does the account's data-retention setting meet the client's requirement?
+- **Q27** Which region does the API serve from, and does that satisfy §9 Q9 on residency?
+
+**Recommendation: `bedrock` for anything touching client data; `byok` for development against the
+synthetic estate.** If Bedrock turns out to be unreachable from Exodus (`ARCHITECTURE.md` §1), the
+right response is a Bedrock VPC endpoint or an allowlisted egress rule — not quietly switching to a
+third-party endpoint because it happens to work.
+
+### Key handling, either way
+
+- Keys come from the environment or a file, **never** from the config file and never from the repo.
+  A secret scan in CI fails the build on committed key material.
+- A key file that is readable by others is refused rather than used.
+- The backend's `repr` carries only the last four characters, so a key cannot reach a traceback, a
+  log line, or an HTML report.
+- Anything resembling a key is scrubbed from exception messages before they propagate.

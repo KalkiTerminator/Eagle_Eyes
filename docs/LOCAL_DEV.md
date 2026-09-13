@@ -163,9 +163,26 @@ broken, and you have found it for $2 instead of discovering it in production.
 
 | Backend | Use |
 |---|---|
-| `bedrock` | **Default for local development.** Real calls, synthetic inputs. |
-| `record` | Real call, response saved to `fixtures/responses/`. Run deliberately. |
+| `bedrock` | Real calls via the client's AWS account. The production path. |
+| `byok` | Real calls on your own Anthropic key. **Easiest way to start locally** — no AWS setup at all. |
 | `mock` | Canned responses. **CI runs here exclusively** — no credentials, no cost, no network. |
+
+```bash
+# byok - the quickest local start
+export ANTHROPIC_API_KEY=...           # never on the command line, never in config
+python3 tools/check_model.py --backend byok
+
+# bedrock
+python3 tools/check_model.py --backend bedrock --region us-east-1
+```
+
+**`byok` is for local development against synthetic data.** Outside a local profile the gateway
+refuses it unless `model.byok_approved_by` names an approver, because it sends prompt content to a
+third party from the client's point of view (`SECURITY.md` §12). Locally nothing real is involved,
+so nothing is at stake.
+
+Use a **personal or team key**, not a client or corporate production key, for the same reason the
+AWS guidance above says to use a dev account.
 
 `mock` is not a lesser fallback; it is a requirement. Per the build kit, routing, the escalation gate,
 fallback behaviour and cost accounting must all be testable without a network call. A test suite that
