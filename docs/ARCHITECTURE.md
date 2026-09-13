@@ -59,15 +59,39 @@ Two consequences to design around now, cheaply:
    to a shared folder. Only the *tool* lives on the jump server; its *output* must reach people who
    will never log into it.
 
+### Environment profiles
+
+Local development, Exodus and the client environment are the same code with different configuration
+(`LOCAL_DEV.md`). Until the real environment is available, **the client environment is simulated on a
+personal machine** — local folders in place of the shares, a mock model backend in place of Bedrock.
+
+| | `local` | `exodus` / `client` |
+|---|---|---|
+| Shares | `./sandbox/...` | `\\<host>\Network_Sharing_Folder` |
+| Code folder | `./sandbox/code_folder` | `\\<fileserver>\code_folder` |
+| Model | `mock` (no credentials, no cost) | `bedrock` |
+| Notifications | log to console | SMTP relay |
+
+Nothing branches on the environment name. Every difference is a named setting, so there is no code
+path that only ever executes in production. Paths are `pathlib.Path` throughout — POSIX locally, UNC
+in the estate.
+
+**Synthetic data only.** `tools/make_fixtures.py` generates the sandbox estate. Real client
+artifacts must never be copied to a personal machine; see `SECURITY.md` §11.
+
 ### The unresolved blocker
 
-**Can Exodus reach AWS over outbound HTTPS?** Still unanswered. Jump servers are often hardened with
-no internet egress precisely because they are the crossing point into production.
+**Can Exodus reach Bedrock over outbound HTTPS?** The client has Bedrock, so the account and the
+models exist. What is unconfirmed is the network path *from the jump server* — a host whose whole
+purpose is to be a locked-down crossing into production, and therefore among the least likely places
+to hold general internet egress.
 
-If the answer is no, the options are, in order of preference: allowlist the Bedrock endpoint for
-Exodus only (one host, one destination — a bounded firewall request); run the analyzer on a
-neighbouring host that has egress and can read the same shares; or fall back to a model that runs
-on-premises, which is a different project.
+In order of preference: a **Bedrock VPC endpoint (PrivateLink)**, which keeps traffic off the public
+internet entirely and is a far easier approval than open egress; a proxy allowlist for that one
+endpoint from that one host; running the analyzer on a neighbouring host that already has egress and
+can reach the same shares; or a self-hosted model, which is a different project.
+
+Local development is unblocked either way — the mock backend needs no network at all.
 
 **Verify this in week one with one command from Exodus.** Everything downstream of ingestion assumes
 it.

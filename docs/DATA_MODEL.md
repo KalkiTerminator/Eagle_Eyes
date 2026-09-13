@@ -87,12 +87,29 @@ The fingerprint hashes a normalized tuple of:
 | `0x...` addresses | `<ADDR>` |
 | IPv4 / IPv6 + port | `<IP>` |
 | Windows, UNC, POSIX paths | `<PATH>/basename` — basename kept |
-| Integers ≥ 4 digits | `<NUM>` |
+| Integers ≥ 4 digits, **including when glued to a unit suffix** — `(?<!\d)\d{4,}(?!\d)`, *not* `\b\d{4,}\b` | `<NUM>` |
 | Currency amounts | `<AMT>` |
 | Quoted literals > 24 chars | `<STR>` |
 | RPA selectors: dynamic `idx`/`tableRow` attrs | attribute dropped, rest kept |
 | Whitespace runs | single space |
 | Case | lowercased *after* all above |
+
+**Use lookarounds, not `\b`, for the integer rule.** There is no word boundary between a digit and a
+letter, so `\b\d{4,}\b` silently fails to match `15000ms`, `30000ms`, `4096KB` — any number glued to
+a unit. RPA logs are full of these: almost every timeout is written that way.
+
+This was caught by running the fingerprint over the synthetic estate
+(`tools/make_fixtures.py`). A 200-failure incident spike that should have collapsed to **one**
+fingerprint fragmented into **four** — one per distinct timeout value — because the four `...ms`
+values never normalized. Measured across the 244 synthetic failures: **23 distinct fingerprints
+before the fix, 14 after** — a dedup rate of 90.6% rising to 94.3%, with the spike collapsing to
+exactly one.
+
+It is worth dwelling on how this would have failed in production: silently, and worst precisely when
+it mattered most. Timeouts are among the commonest RPA failures and the likeliest to arrive in a
+spike, so the cost control would have degraded hardest under exactly the load it exists to handle,
+with nothing in the system reporting a fault. **Every normalization rule needs a test that asserts a
+known-identical set of failures collapses to one fingerprint.**
 
 **Integers below 4 digits are kept on purpose.** `index 3` and `index 40` are plausibly different
 failures; `order 100294` and `order 100295` are the same failure on different records. The 4-digit

@@ -1,0 +1,6 @@
+sandbox/
+*.db
+__pycache__/
+*.pyc
+.venv/
+config/local.yaml
