@@ -37,12 +37,12 @@ what you inherited.
 |---|---|---|---|
 | 🔴 B1 | Is an AWS account available with Bedrock enabled in the target region? | Yes | Cloud/IT |
 | 🔴 B2 | Which SSO provider, and who owns the groups driving authorization? | Entra ID, team-mapped groups | IT/Identity |
-| 🔴 B3 | **Can Exodus reach Bedrock over outbound HTTPS?** Direct, proxy, or allowlist? | Assumed yes — **unverified, and if no the analyzer cannot call a model at all. One command settles it.** | Network / IT |
-| 🔴 B4 | **May we install an application on Exodus?** What review does that need? | Yes — but a jump server is a control point into production and may be scrutinised harder than an ordinary host | Security + IT |
+| 🔴 B3 | **Can each host reach a model endpoint over outbound HTTPS?** Direct, proxy, or allowlist? | Assumed yes — **unverified, and if no the analyzer cannot call a model at all. One command settles it.** | Network / IT |
+| 🔴 B4 | **May we install an application on the host?** What review does that need? | Yes — but a jump server is a control point into production and may be scrutinised harder than an ordinary host | Security + IT |
 | 🔴 B5 | **Can IT create a read-only service account** with access to the VM shares and the code folder? | Yes — **must be share-scoped, never `C$`/`ADMIN$`, never write** | IT / Identity |
 | 🟡 B5a | Does the analyzer run under that service account on a schedule, or only in an interactive session? | Interactive — the catch-up scan covers both, so this changes the trigger, not the design | IT |
-| 🟡 B5b | Does Exodus have disk encryption? The SQLite database depends on it. | Yes | IT |
-| 🟡 B5c | Does the SMTP relay accept mail from Exodus without a new rule? | Yes | IT |
+| 🟡 B5b | Does each host have disk encryption? The SQLite database depends on it. | Yes | IT |
+| 🟡 B5c | Does the SMTP relay accept mail from the host without a new rule? | Yes | IT |
 | 🟡 B5d | Which shared folder hosts the HTML reports, and who can read it? | A team share — **the one new place client-derived content lands; needs its own ACL review** | IT + Security |
 | 🟡 B3a | Is the shared code folder backed up or version-controlled in any way? | No — manual `.txt` copies only | RPA ops |
 | 🟡 B6 | Mail relay — SES, or an internal relay? Approval needed? | SES with verified domain | IT |
@@ -131,7 +131,8 @@ Things I decided because there was no one to ask. Each is a place the design cou
     an addition** — ask before Phase 1 if there is any chance of it.
 11. **English-language logs and screenshots.** OCR and PII detection are language-sensitive.
 12. **Screenshots are PNG at desktop resolution.** Drives the downscale and token math.
-13. **Exodus can reach Bedrock.** The whole design rests on it and it is unverified (B3).
+13. **At least one host can reach a model endpoint.** The whole design rests on it, it is unverified,
+    and it differs per machine (B3).
 14. **The code folder's `.txt` files are current enough to reason about.** Manually maintained, with
     no version control and no record of which version a bot was running. Mitigated by an mtime
     staleness flag, not solved (`ARCHITECTURE.md` §4.5).
@@ -140,12 +141,15 @@ Things I decided because there was no one to ask. Each is a place the design cou
     the `pairing_method` distribution.
 16. **iBot's log format is stable across versions.** If it drifts, the fingerprint's normalization
     breaks silently — exactly what `DATA_MODEL.md` §2.5 versioning exists for.
-17. **SMB reads from Exodus are fast enough** to walk a day's folders for all pilot bots in a
+17. **SMB reads from the host are fast enough** to walk a day's folders for all pilot bots in a
     reasonable run. Unmeasured; latency over SMB to many VMs could dominate runtime.
 18. **A file that stops changing is complete.** The scanner may otherwise read a log mid-write.
     Mitigated by requiring a stable mtime for N seconds before processing.
-19. **Overnight and weekend gaps are acceptable in Phase 1.** The analyzer only runs when Exodus is
-    open. Fine for a pilot; a real limitation at 150 developers (Phase 3 addresses it).
+19. **Overnight and weekend gaps are acceptable in Phase 1**, if the first host is one someone has to
+    switch on. Solved by choosing an always-on host, not by changing code.
+20. **Installs stay few enough that dedup still works.** Every install is its own cache unless a
+    shared cache path is configured; ten installs takes the effective hit rate from ~70% to ~7%
+    (`ARCHITECTURE.md` §1).
 
 ---
 
@@ -155,8 +159,8 @@ If bandwidth allows only a handful:
 
 Two of these are an afternoon each, and both are blocking. Do them first.
 
-1. **B3** — can Exodus reach Bedrock over HTTPS? *One command from the jump server. If the answer is
-   no, the analyzer cannot call a model and nothing else in the plan matters.*
+1. **B3** — can a host you can install on reach a model endpoint over HTTPS? *One command per host.
+   If no host can, the analyzer cannot call a model and nothing else in the plan matters.*
 2. **D5** — how are a log and its screenshot paired inside a date folder? *One directory listing
    settles it. If it is timestamp proximity only, screenshots become unreliable for concurrent
    failures and the correlator has to refuse rather than guess — a design consequence, not a detail.*

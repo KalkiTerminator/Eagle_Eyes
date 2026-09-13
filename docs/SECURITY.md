@@ -40,8 +40,8 @@ Assets, ranked by damage on exposure:
 | T7 | PII leaks into our own application logs | Careless error logging | **High** | High | Structured logging with allowlisted fields only |
 | T8 | Screenshot reaches a mailbox | Image embedded in notification | Med | High | Hard rule: notifications link, never embed |
 | T9 | Quarantine bucket readable by wrong role | IAM drift | Low | Critical | Boot-time policy assertion; IaC; periodic check |
-| **T10** | **The analyzer's service account can read every bot's logs and screenshots** | One credential with estate-wide share read | Med | **High** | Read-only; scoped to `Network_Sharing_Folder` only, never `C$`/`ADMIN$`; no write anywhere in the estate; credential held only on Exodus; usage audited |
-| **T11** | **Exodus becomes a concentration point** | SQLite holds every sanitized log and analysis in one file | Med | High | Jump server's existing hardening and access controls; DB file ACL'd to the service account; short retention on log content |
+| **T10** | **The account the analyzer runs as can read every bot's logs and screenshots** | One credential with estate-wide read | Med | **High** | Read-only; scoped to the source paths only, never `C$`/`ADMIN$`; no write anywhere in the estate; usage audited. **Multiply by the number of hosts it is installed on** |
+| **T11** | **The host becomes a concentration point** | SQLite holds every sanitized log and analysis in one file | Med | High | Host hardening and disk encryption; DB file ACL'd to the running account; short retention on log content. **Weaker on a laptop than on a managed server — see §11a** |
 | **T12** | **Path traversal out of the configured roots** | A crafted path or a bug reads arbitrary files over SMB | Low | High | Resolve every path and assert it stays under its configured root; refuse to start otherwise |
 
 **The estate-wide threats from the previous draft are gone.** There is no agent on any bot VM, no
@@ -257,17 +257,17 @@ Scrubber effectiveness is tested, not assumed:
 | Entity | Store | Encryption | Retention | Deletion |
 |---|---|---|---|---|
 | Screenshot (Mode 0) | **Not stored by us** — stays on the VM share | Estate's existing controls | Estate's existing policy | **Nothing to delete; we hold no copy** |
-| Screenshot derivative (Modes 1–2 only) | Exodus local, dedicated dir | BitLocker / EFS | **7 days** | Retention job |
-| Sanitized log | SQLite on Exodus | Volume encryption | 90 days | Retention job (nulls column, keeps row) |
-| Code snapshot | SQLite on Exodus | Volume encryption | 90 days | Retention job |
-| Analysis | SQLite on Exodus | Volume encryption | 12 months | Retention job |
-| Fingerprint + metadata | SQLite on Exodus | Volume encryption | 24 months | Retention job |
-| Feedback | SQLite on Exodus | Volume encryption | 24 months | — |
-| Audit log | SQLite on Exodus, append-only | Volume encryption | **7 years** (proposed — §9 Q12) | Never by the app |
+| Screenshot derivative (Modes 1–2 only) | Host-local, dedicated dir | BitLocker / EFS | **7 days** | Retention job |
+| Sanitized log | SQLite on the host | Volume encryption | 90 days | Retention job (nulls column, keeps row) |
+| Code snapshot | SQLite on the host | Volume encryption | 90 days | Retention job |
+| Analysis | SQLite on the host | Volume encryption | 12 months | Retention job |
+| Fingerprint + metadata | SQLite on the host | Volume encryption | 24 months | Retention job |
+| Feedback | SQLite on the host | Volume encryption | 24 months | — |
+| Audit log | SQLite on the host, append-only | Volume encryption | **7 years** (proposed — §9 Q12) | Never by the app |
 | HTML reports | Shared output folder | Share ACLs | 90 days | Retention job |
 
 **The reports folder needs its own ACL review.** It is the one genuinely new place client-derived
-content lands, it is readable by design so developers can use it without Exodus, and a permissive
+content lands, it is readable by design so developers need no access to the analyzer's host, and a permissive
 share there would undo the access control in every other row of this table.
 
 Notes:
@@ -280,7 +280,8 @@ Notes:
   retaining the underlying PII.
 - SMB reads are in-estate and should use SMB3 with encryption where the estate supports it.
 - TLS 1.2+ for the Bedrock call and the SMTP relay.
-- The SQLite file inherits Exodus's disk encryption; confirm the jump server actually has it.
+- The SQLite file inherits the host's disk encryption; confirm each host actually has it. A laptop
+  without full-disk encryption is not a suitable host for real client data.
 
 ---
 
@@ -372,12 +373,12 @@ Take these as a list. Blocking ones are marked.
 - Q6 Which client-specific identifier formats must the scrubber cover? We need actual formats, and the scrubber is materially incomplete without them.
 - Q7 May bot source code be fetched by an automated service at all? Which repos are in scope?
 
-**Exodus and the shares** *(internal — IT, security ops, and the iBot team)*
-- **Q17 [BLOCKING]** May Exodus reach the Bedrock endpoint over outbound HTTPS? If not, who owns the allowlist? *Not a security question about data so much as the one that decides whether the system can exist.*
+**Hosts and shares** *(internal — IT, security ops, and the iBot team)*
+- **Q17 [BLOCKING]** May the hosts you choose reach a model endpoint over outbound HTTPS? If not, who owns the allowlist? *Not a security question about data so much as the one that decides whether the system can exist. Ask per host — a laptop on the corporate network and a hardened jump server have very different egress rules.*
 - **Q18** What scope may the analyzer's service account hold? Confirm **read-only, restricted to `Network_Sharing_Folder` and the code folder** — never `C$`/`ADMIN$`, never write. A broad read credential is still a target (T10).
-- Q19 Is installing an application on Exodus acceptable, and what review does that require? Exodus is a control point into production, so this may be scrutinised harder than an ordinary host.
+- Q19 Is installing the application on the chosen hosts acceptable, and what review does that require? A jump server is a control point into production and will be scrutinised harder than an ordinary desktop; a laptop raises different questions again (§11a).
 - Q20 Who may read the HTML reports share? This is the only new place client-derived content lands, and it is readable by design.
-- Q21 Does Exodus have disk encryption enabled? The SQLite database relies on it.
+- Q21 Does every host have disk encryption enabled? The SQLite database relies on it, and this is the question a laptop most often fails.
 - Q22 Are there bots whose screens must never be read at all, needing a per-bot exclusion list?
 - Q23 Will iBot narrow screenshot capture to the failing window? *Still the best upstream improvement available, and now purely an efficiency and Mode 1/2 question rather than a Mode 0 blocker.*
 
@@ -394,8 +395,8 @@ Take these as a list. Blocking ones are marked.
 - Q15 Is a penetration test required before pilot, and what is its lead time?
 - Q16 What is the breach notification path if residual PII is found in a stored analysis?
 
-**Answer Q17 before anything else** — it decides whether the analyzer can call a model from Exodus
-at all. Then Q5 and Q8 before Phase 1 code, and Q1/Q2 before Phase 2.
+**Answer Q17 before anything else** — it decides whether the analyzer can call a model from the hosts
+you have at all. Then Q5 and Q8 before Phase 1 code, and Q1/Q2 before Phase 2.
 
 Note what moved: Q1 and Q2 (may screenshots reach a model) no longer gate Phase 1 in any way, because
 Mode 0 now sends nothing *and copies nothing*. They gate only the vision capability in Phase 2. The rest can resolve during Phase 1 —
@@ -407,7 +408,7 @@ Mode 0 is safe while they are open, which is the point of shipping in it.
 
 The kit asked that these be called out rather than buried. In full:
 
-1. **In Modes 1–2 a screenshot derivative is created on Exodus** rather than being narrowed on the
+1. **In Modes 1–2 a screenshot derivative is created on the analyzer's host** rather than being narrowed on the
    bot VM. Bought: one maintainable implementation instead of an estate-wide change. Cost: a
    short-lived second copy of client pixels on the jump server. **Mode 0 has no such tradeoff — it
    creates no copy at all.**
@@ -428,23 +429,25 @@ The kit asked that these be called out rather than buried. In full:
    access. Bought: operability. Cost: metadata is not nothing — failure patterns leak some
    information about client operations.
 
-6. **The analyzer runs only while Exodus is logged in.** Bought: no always-on host to harden, patch
-   and monitor. Cost: overnight failures wait for the next session. Not a security issue; recorded
-   because it shapes what the pilot can promise.
+6. **Availability follows whichever host it is installed on.** Bought: no dedicated always-on machine
+   to harden, patch and monitor. Cost: on a laptop or a desktop, overnight failures wait for someone
+   to switch it on. Solved by choosing an always-on host, not by changing code.
 
 7. **One service account can read every bot's logs and screenshots.** Bought: no software and no
    credential on any bot VM, and no second copy of any image. Cost: a single broad *read* credential
-   (T10). Mitigation: read-only, share-scoped, no write, held only on Exodus, usage audited. Far
+   (T10). Mitigation: read-only, share-scoped, no write, usage audited — **and held on as few hosts
+   as possible, since every install is another copy of it**. Far
    better than the per-VM agent it replaces, but not nothing — say so in review.
 
-8. **Every analysis and sanitized log sits in one SQLite file on Exodus.** Bought: no database
+8. **Every analysis and sanitized log sits in one SQLite file on the host.** Bought: no database
    server, no backup agent, no DBA, and data that never leaves the estate except as a model prompt.
-   Cost: a concentration point (T11) whose protection is entirely the jump server's existing
-   hardening.
+   Cost: a concentration point (T11) whose protection is entirely whatever that host has — strong on
+   a managed server, much weaker on a laptop (§11a).
 
-9. **HTML reports land on a share readable without Exodus.** Bought: 150 developers get value without
-   logging into a jump server — the "no change to how they work" requirement. Cost: the one new
-   location holding client-derived content, and the easiest thing in this design to misconfigure.
+9. **HTML reports land on a share readable by people with no access to the analyzer's host.** Bought:
+   150 developers get value without an account on that machine — the "no change to how they work"
+   requirement. Cost: the one new location holding client-derived content, and the easiest thing in
+   this design to misconfigure.
 
 10. **Analyses may reason about code the bot was not running.** Bought: code input at all, given iBot
     has only a copy function and no version control. Cost: a real correctness risk, mitigated by the
@@ -472,6 +475,34 @@ screenshots, which are never exported for development under any circumstances.
 
 Full guidance in `LOCAL_DEV.md`.
 
+
+---
+
+## 11a. Choosing a host
+
+The analyzer runs on any machine (`ARCHITECTURE.md` §1). **That makes host choice a security
+decision**, because the database holding every sanitized log and analysis inherits whatever
+protection the host has, and nothing more.
+
+| Host | Suitable for client data? |
+|---|---|
+| Managed server or VM | **Yes.** Patched, encrypted, backed up, access-controlled, physically secure. |
+| Jump server | Yes, subject to Q19 — it is a control point, so expect closer review. |
+| Managed corporate desktop | Usually, if disk encryption and endpoint management are enforced. |
+| **Laptop** | **Only with full-disk encryption, and preferably not at all.** It leaves the building, it gets lost, and a copy of the estate's analyses travels with it. |
+| Personal or unmanaged machine | **No.** Not for client data under any circumstances (§11). |
+
+Two rules follow:
+
+1. **Install on as few hosts as necessary.** Every install is another copy of the read credential
+   (T10) and another concentration of analyses (T11). "Runs anywhere" is a portability property, not
+   an invitation to put it everywhere.
+2. **Prefer one always-on managed host over several personal ones.** It is better for security, for
+   availability, and for cost — per-install dedup caches fragment, and ten installs roughly triples
+   the model spend (`ARCHITECTURE.md` §1).
+
+The shared dedup cache is a partial answer to the cost half of that, not to the security half. A
+laptop reading a shared cache is still a laptop holding client-derived analyses.
 
 ---
 
@@ -526,7 +557,7 @@ Everything in §9 still applies, and these are additional:
 - **Q27** Which region does the API serve from, and does that satisfy §9 Q9 on residency?
 
 **Recommendation: `bedrock` for anything touching client data; `byok` for development against the
-synthetic estate.** If Bedrock turns out to be unreachable from Exodus (`ARCHITECTURE.md` §1), the
+synthetic estate.** If Bedrock turns out to be unreachable from a chosen host (`ARCHITECTURE.md` §1), the
 right response is a Bedrock VPC endpoint or an allowlisted egress rule — not quietly switching to a
 third-party endpoint because it happens to work.
 

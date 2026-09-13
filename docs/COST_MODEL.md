@@ -257,13 +257,13 @@ Funnel per 100 failures ingested: 70 dedup hits ($0) → 30 triaged → 4.5 nois
 
 ### Infrastructure, per month
 
-Almost nothing, because there is almost no infrastructure. The analyzer runs on Exodus, a server
+Almost nothing, because there is almost no infrastructure. The analyzer runs on the host, a server
 that already exists and is already paid for; storage is a SQLite file on its disk; the only external
 call is to Bedrock.
 
 | Component | Cost |
 |---|---:|
-| Exodus jump server | **$0 — already exists** |
+| Host machine | **$0 — a machine you already have** |
 | SQLite storage (a few GB/year on existing disk) | ~$0 |
 | Internal SMTP relay | $0 — existing |
 | Reports on an existing share | ~$0 |
@@ -313,7 +313,7 @@ Checked **before** every model call, never after.
 The per-bot hourly limit exists because the realistic runaway is one misbehaving bot, not
 estate-wide growth.
 
-One risk specific to this design: **a catch-up scan after a long gap.** If Exodus is unopened over a
+One risk specific to this design: **a catch-up scan after a long gap.** If the host is unavailable over a
 weekend or a holiday, the next run finds a large backlog and processes it in one burst. Dedup should
 absorb most of it, but the daily cap must be a cap on the *run*, not on wall-clock time, or a Monday
 morning catch-up will trip it and stall legitimate work. Size the cap against the largest plausible

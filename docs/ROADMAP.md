@@ -14,13 +14,13 @@ reviewer (part-time), **PO** you.
 |---|---|---|
 | Take `SECURITY.md` §9 to EXL security; get Q1, Q2, Q5, Q8 answered | PO | — |
 | Confirm Bedrock data-handling terms against the client contract, in writing | PO + Sec | — |
-| **Confirm Bedrock reachability** — `tools/check_bedrock.py`, on a dev account now and on Exodus when access lands | BE + DevOps | 0.1 |
+| **Confirm Bedrock reachability** — `tools/check_model.py`, on a dev account now and on the host when access lands | BE + DevOps | 0.1 |
 | **Stand up the local sandbox** — `tools/make_fixtures.py`, real Bedrock against synthetic data. Unblocked today; needs no sign-off. | BE | 0.2 |
 | **Get one real directory listing** from a VM share date folder + one sanitized sample log | PO | 0.1 |
 | **Confirm the log↔screenshot pairing convention** from that sample (run ID? filename? timestamp only?) | PO + iBot team | — |
 | Confirm the code folder's naming convention and how `bot_number` maps to a file | PO | — |
 | Service account with read-only access to the VM shares and code folder | IT / Identity | 0.5 |
-| Approval to install an application on Exodus | Security + IT | — |
+| Approval to install an application on the host | Security + IT | — |
 | **Open the iBot conversation:** capture narrowing, structured error metadata | PO + iBot team | — |
 | AWS account, VPC, Bedrock model access enabled in-region | DevOps | 0.5 |
 | Confirm SSO provider and the group structure driving authorization | PO + IT | — |
@@ -31,10 +31,10 @@ reviewer (part-time), **PO** you.
 
 **Dependencies:** EXL security, client contract owner, IT/cloud/network, iBot team, RPA ops.
 
-**Exit:** Q17 (Exodus → Bedrock egress) confirmed; Q5 and Q8 answered; pilot bots named; a real
+**Exit:** Q17 (host → model endpoint egress) confirmed; Q5 and Q8 answered; pilot bots named; a real
 directory listing in hand so pairing is settled; service account created; baseline captured.
 
-> **Two of these are an afternoon each and both are blocking.** One command from Exodus settles
+> **Two of these are an afternoon each and both are blocking.** One command from the host settles
 > whether the analyzer can call a model at all. One directory listing settles whether screenshots
 > can be attached to the right failure. Neither needs a meeting, and everything downstream assumes
 > both. Do them first.
@@ -60,7 +60,7 @@ scale — not a prototype with a pilot label.
 - Ingestion, sanitization, fingerprinting, dedup
 - Triage (Haiku 4.5) + deep text analysis (Sonnet 5)
 - **Screenshots captured, encrypted, stored, viewable in UI — Mode 0, not sent to any model**
-- SQLite storage on Exodus
+- SQLite storage on the host
 - Email notification with suppression, via the internal relay
 - HTML report per failure, written to a shared folder
 - Audit logging, retention job
@@ -82,7 +82,7 @@ pattern learning, any always-on service.
 | Analysis engine, `model_gateway`, prompts | BE + PO | 2.5 |
 | Notifications + HTML reports | BE | 1.5 |
 | Audit, retention, budget guard | BE | 1 |
-| Packaging + install on Exodus, scheduling | BE + DevOps | 1 |
+| Packaging + install on the host, scheduling | BE + DevOps | 1 |
 | Security review + hardening | Sec + BE | 1.5 |
 | Pilot onboarding, runbook, docs | PO + BE | 1 |
 
@@ -144,10 +144,10 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 
 **Goal:** 150 developers, all pilot-validated bot categories — and getting off the jump server.
 
-The Exodus deployment is deliberately a Phase 1 shortcut. It is bound to an interactive session, so
-overnight failures wait for someone to log in, and it does not serve a web UI to anyone who is not on
-the jump server. Phase 3 moves the same code to a host that stays up. The catch-up scan built in
-Phase 1 (`ARCHITECTURE.md` §4.3) is what makes that a change of trigger rather than a rewrite.
+Phase 1 likely runs on whatever machine is convenient — often a developer's own. That is fine for a
+pilot and limiting at scale: a laptop sleeps, and per-install databases fragment the dedup cache
+(`ARCHITECTURE.md` §1). Phase 3 moves to an always-on host and a shared store. The catch-up scan and
+the host-agnostic paths built in Phase 1 make that a change of configuration rather than a rewrite.
 
 ### Scope
 
@@ -160,7 +160,7 @@ Phase 1 (`ARCHITECTURE.md` §4.3) is what makes that a change of trigger rather 
 
 | Workstream | Roles | Weeks |
 |---|---|---|
-| **Move off Exodus to an always-on host; port SQLite → Postgres** | BE + DevOps | 3 |
+| **Consolidate onto an always-on host; port SQLite → Postgres** | BE + DevOps | 3 |
 | **Web UI + SSO** (needs a host that stays up) | FE + BE | 3 |
 | Chat integration | BE | 1 |
 | Operations dashboard | FE + BE | 2.5 |
@@ -197,13 +197,13 @@ Phase 1 with nothing consuming it is deliberate — the data has to exist before
 
 | Dependency | Needed by | Owner | Risk if late |
 |---|---|---|---|
-| **Exodus → Bedrock outbound HTTPS** | **Phase 1** | Network / IT | **No model call possible. Hard blocker — one command settles it.** |
+| **Host → model endpoint outbound HTTPS** | **Phase 1** | Network / IT | **No model call possible. Hard blocker — one command settles it.** |
 | **Read-only service account for VM shares + code folder** | **Phase 1** | IT / Identity | Analyzer cannot read anything |
-| **Approval to install on Exodus** | **Phase 1** | Security + IT | No deployment target |
+| **Approval to install on the host** | **Phase 1** | Security + IT | No deployment target |
 | **Log↔screenshot pairing convention** | **Phase 1** | iBot team (internal) | Screenshots attach to the wrong failure, or must be dropped |
 | Code folder naming convention | Phase 1 | PO / RPA ops | Code input unavailable; log-only analysis |
-| SMTP relay accepts mail from Exodus | Phase 1 | IT | Reports only, no notifications |
-| Shared folder for HTML reports, with ACLs | Phase 1 | IT | Developers need Exodus to see results — defeats the purpose |
+| SMTP relay accepts mail from the host | Phase 1 | IT | Reports only, no notifications |
+| Shared folder for HTML reports, with ACLs | Phase 1 | IT | Developers would need access to the analyzer's host — defeats the purpose |
 | iBot: structured error metadata | Phase 1 quality | iBot team (internal) | Fingerprint stays regex-based and fragile |
 | iBot: capture narrowing | Phase 2 | iBot team (internal) | Falls back to reading full screenshots for Modes 1–2 |
 | Security answers Q1, Q2 | Phase 2 | EXL Security | Phase 2 slips; Phase 1 unaffected |
@@ -218,7 +218,7 @@ Phase 1 with nothing consuming it is deliberate — the data has to exist before
 | Penetration test (Q15) | Phase 3 | Security | Blocks estate rollout |
 
 **The critical path runs through IT, not Security.** Every blocker above is an access or permission
-question: egress from Exodus, a service account, permission to install, a share for reports. None is
+question: egress from the host, a service account, permission to install, a share for reports. None is
 a design question, and none can be worked around.
 
 The compensating gain is large: because Mode 0 copies no screenshots and stores nothing outside the

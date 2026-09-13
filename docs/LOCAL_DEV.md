@@ -35,7 +35,7 @@ workflow.
 
 ## 2. Environment profiles
 
-Local, Exodus and client differ only in configuration. One code path, three profiles.
+Local and client differ only in configuration. One code path, and as many profiles as you have hosts.
 
 ```yaml
 # config/local.yaml
@@ -59,8 +59,8 @@ screenshot_mode: 0
 ```
 
 ```yaml
-# config/exodus.yaml
-environment: exodus
+# config/client.yaml
+environment: client
 share_root:    \\<vm-or-dfs>\Network_Sharing_Folder
 code_root:     \\<fileserver>\code_folder
 database:      D:\EagleEyes\eagle_eyes.db
@@ -126,12 +126,12 @@ plausible implementation quietly does the wrong thing.
 
 ```bash
 pip install 'anthropic[bedrock]'
-python3 tools/check_bedrock.py --region us-east-1
+python3 tools/check_model.py --region us-east-1
 ```
 
 One small call per model. On failure it names which link is broken — credentials, expired token,
 model access, region, model ID, throttling, or no egress — and what to do about it. Run it again on
-Exodus the day access is granted; that is where it is most likely to report no egress.
+each host you intend to install on; a hardened server is where it is most likely to report no egress.
 
 **The commonest first-run failure is not a network problem.** Bedrock requires model access to be
 enabled explicitly, **per account and per region**, in the Bedrock console under *Model access*. Until
@@ -231,7 +231,7 @@ Honest limits. Each of these is a real risk that the sandbox actively hides:
 
 | Hidden here | Why it matters | Where it surfaces |
 |---|---|---|
-| **SMB latency** | Local reads are instant; reading a day of folders across many VMs may dominate runtime | First run on Exodus |
+| **SMB latency** | Local reads are instant; reading a day of folders across many VMs may dominate runtime | First run on the host |
 | **Real log format** | Both the generator's format and `fixtures/samples/` are invented. Fingerprint tuning against them is tuning against a guess. | The moment a real sample arrives |
 | **Real pairing convention** | Fixtures pair by filename; reality may only offer timestamps | `OPEN_QUESTIONS.md` D5 |
 | **Files being written as we read** | No partial writes locally | Under real load |

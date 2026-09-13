@@ -7,57 +7,85 @@ screenshot) and produces a root-cause diagnosis plus a suggested fix.
 
 ---
 
-## 1. Deployment model — one host, three shares
+## 1. Deployment model — an ordinary application, installed anywhere
 
-This replaces an earlier draft that assumed a collector on every bot VM. The real environment makes
-that unnecessary.
+Eagle Eyes is a normal desktop/server application. It runs wherever you put it:
+a developer's **laptop**, a **desktop**, a **VM**, a **build agent**, a **jump server**, a
+**file server** — on Windows, Linux or macOS, installed or portable from a folder.
 
-- Every bot VM runs iBot and writes logs and screenshots to local disk.
-- **Network sharing is enabled on each VM**, so those folders are readable over SMB.
-- Developers work through **Exodus**, a jump server, and open bot VMs remotely from there.
-- The latest code for every bot and process lives in **one shared folder**, maintained manually
-  (iBot has only a copy function, so code is pasted into Notepad and saved as `.txt`).
+**No host is special.** Earlier drafts of this document treated one machine (a jump server called
+Exodus) as the architecture. That was wrong: it is one host where the application may be
+convenient to run, not a structural assumption. Anything built around a single named machine has to
+be rebuilt the first time someone else needs it.
 
-So the analyzer is **a single application installed on Exodus** that reads three folder trees. It is
-not a distributed system.
+### What it actually needs
+
+| Requirement | Why |
+|---|---|
+| Python 3.11+, or the packaged build | No admin rights needed for the portable form |
+| **Read** access to the logs and screenshots | Any path: local folder, mapped drive, UNC, NFS mount, synced folder |
+| **Read** access to the code folder | Same |
+| A writable place for its own data | Platform default, or anywhere via `EAGLE_EYES_DATA_DIR` |
+| Network reach to a model endpoint | Bedrock or the Claude API (§5) |
+
+That is the whole list. No service account is required unless you want unattended runs, no database
+server, no admin install, no inbound ports.
+
+### Where its data goes
+
+Never a hardcoded path. `eagle_eyes/runtime.py` resolves it per platform:
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\EagleEyes\` |
+| macOS | `~/Library/Application Support/EagleEyes/` |
+| Linux | `$XDG_DATA_HOME/eagleeyes/` or `~/.local/share/eagleeyes/` |
+| Portable | `data/` beside the application, when a `portable.txt` marker is present |
+| Override | `EAGLE_EYES_DATA_DIR` |
+
+Portable mode exists for locked-down desktops, USB sticks, and anywhere an install is unwelcome.
+
+Config is searched most-specific-first — explicit flag, `EAGLE_EYES_CONFIG`, the working directory,
+the user config directory, then beside the application — so one shared config can live on a network
+path while any single machine still overrides it.
+
+### Sources are just paths
 
 ```
-Bot VM shares  ──SMB──┐
-Code folder    ──SMB──┼──► Eagle Eyes on Exodus ──HTTPS──► Bedrock
-Screenshot dirs──SMB──┘            │
-                                   ├──► SMTP relay ──► developer inbox
-                                   └──► HTML reports ──► shared folder
+\\fileserver\Network_Sharing_Folder\data     UNC
+Z:\data                                      mapped drive
+C:\bots\data                                 local
+/mnt/bots/data                              POSIX mount
+~/sandbox/Network_Sharing_Folder/data       local development
 ```
 
-### Why this is better than what I proposed before
+All five are handled identically. Whether a source happens to be a network path affects retry and
+timeout behaviour, nothing else.
 
-| | Previous draft | This design |
-|---|---|---|
-| Software on bot VMs | Agent on every VM | **None** |
-| Change control | Every emitter release | **Once, on one host** |
-| Outbound to AWS | Hundreds of VMs | **One host** |
-| New credential locations | Every VM | **One service account** |
-| New store of client PII | S3 quarantine + artifacts | **None — see §2** |
-| AWS infrastructure | ECS, RDS, SQS, ALB, S3 | **Bedrock only** |
+### The consequence of running anywhere: dedup fragments
 
-The estate-wide attack surface I flagged as unmitigable (threats T10–T12) **disappears entirely**.
-That is the single biggest gain here, and it came from the environment, not from design work.
+One install, one SQLite database, one dedup cache — fine. **Ten installs means ten caches**, so the
+same failure is analysed ten times, and the primary cost control quietly stops working.
 
-### What it costs
+Measured against `COST_MODEL.md`, at 2,000 failures/day: one shared store gives a 70% hit rate and
+about **$16.63/day**. Spread across ten installs the effective rate falls to roughly 7% and the cost
+rises to about **$51.55/day** — for identical information.
 
-**The analyzer is bound to Exodus being logged in.** You confirmed the jump server has to be opened.
-That makes this a scheduled job during working hours, not a 24/7 service — failures overnight are
-analysed when someone next logs in. Acceptable for a pilot; a real constraint at 150 developers, and
-the reason Phase 3 still needs a service somewhere that stays up.
+**Putting the SQLite database on the share is not the fix.** SQLite over SMB is a documented way to
+corrupt a database: its locking relies on byte-range locks that network filesystems implement
+inconsistently or not at all, and the failure is silent until it is total.
 
-Two consequences to design around now, cheaply:
+**The fix is a separate shared cache** (`eagle_eyes/cache.py`): one small JSON file per fingerprint
+in a sharded directory on a path every install can reach. Reads are plain file reads with no
+locking. Writes go to a temporary file in the same directory and are renamed into place — atomic on
+NTFS and POSIX alike — so a reader sees the old file or the new one, never a half-written one. Two
+installs writing the same fingerprint is harmless, because the content is a function of the
+fingerprint.
 
-1. **Catch-up on startup is mandatory, not optional.** The scanner must process everything since its
-   last watermark, not just what is new this minute. Get this right in Phase 1 and the eventual move
-   to an always-on host changes the trigger, not the logic.
-2. **Developers must not need Exodus to see results.** Analyses go out by email and as HTML reports
-   to a shared folder. Only the *tool* lives on the jump server; its *output* must reach people who
-   will never log into it.
+It is always optional. An unreachable share, an offline laptop, a path that does not exist: all
+degrade to "no cache", which costs money and breaks nothing. And a configured root that **does not
+exist is reported, never created** — a typo'd share path that silently became a private cache would
+have every install reporting a healthy cache while each paid full price.
 
 ### Two operating modes, one code path
 
@@ -65,13 +93,14 @@ The analyzer runs either way, and the difference is a flag rather than a build:
 
 | | **Interactive** | **Scheduled** |
 |---|---|---|
-| Started by | a developer on Exodus | Task Scheduler |
+| Started by | a person, on whatever machine they use | Task Scheduler, cron, or a service |
 | Scope | whatever they pick — one log, a date, a bot, a service line | a configured path |
 | Before running | a review table they can change | nothing; runs what it finds |
 | Flag | *(default)* | `--yes` |
 
-Interactive is the primary mode for the pilot. Developers already work on Exodus, already know which
-bot they are chasing, and a scheduled sweep gives them no way to say "not that one, this one."
+Interactive is the primary mode for the pilot: a developer already knows which bot they are chasing,
+and a scheduled sweep gives them no way to say "not that one, this one." Scheduled suits an always-on
+host once the pilot settles.
 
 **Discovery is read-only and costs nothing**, so the review can always be shown before anything is
 sent. `--dry-run` stops there.
@@ -104,13 +133,13 @@ and in CI), and **command-line arguments** for the scheduler. All three converge
 
 ### Environment profiles
 
-Local development, Exodus and the client environment are the same code with different configuration
+Local development and the client environment are the same code with different configuration
 (`LOCAL_DEV.md`). Until the real environment is available, development runs **real Bedrock calls
 against a wholly synthetic estate** — local folders in place of the shares, fabricated logs,
 screenshots and code. Real model behaviour, and no client data anywhere, so it needs no sign-off to
 begin.
 
-| | `local` | `exodus` / `client` |
+| | `local` | `host` / `client` |
 |---|---|---|
 | Shares | `./sandbox/...` | `\\<host>\Network_Sharing_Folder` |
 | Code folder | `./sandbox/code_folder` | `\\<fileserver>\code_folder` |
@@ -126,20 +155,22 @@ artifacts must never be copied to a personal machine; see `SECURITY.md` §11.
 
 ### The unresolved blocker
 
-**Can Exodus reach Bedrock over outbound HTTPS?** The client has Bedrock, so the account and the
-models exist. What is unconfirmed is the network path *from the jump server* — a host whose whole
-purpose is to be a locked-down crossing into production, and therefore among the least likely places
-to hold general internet egress.
+**Can the host you choose reach a model endpoint over outbound HTTPS?** The client has Bedrock, so
+the account and the models exist; what is unconfirmed is the network path from wherever this runs.
+This is worth checking per host rather than once: a developer laptop on the corporate network and a
+hardened jump server have very different egress rules, and a jump server — whose whole purpose is to
+be a locked-down crossing into production — is among the least likely places to hold general egress.
 
 In order of preference: a **Bedrock VPC endpoint (PrivateLink)**, which keeps traffic off the public
-internet entirely and is a far easier approval than open egress; a proxy allowlist for that one
-endpoint from that one host; running the analyzer on a neighbouring host that already has egress and
-can reach the same shares; or a self-hosted model, which is a different project.
+internet entirely and is a far easier approval than open egress; a proxy allowlist for that endpoint;
+**running the analyzer on a different host that already has egress** and can reach the same paths —
+which is now simply a matter of installing it somewhere else; or a self-hosted model, which is a
+different project.
 
-`tools/check_bedrock.py` settles it in one command, and names which link is broken when it fails.
-Run it locally now and on Exodus the day access is granted.
+`tools/check_model.py` settles it in one command per host, and names which link is broken when it
+fails. Run it wherever you intend to install.
 
-**Verify this in week one with one command from Exodus.** Everything downstream of ingestion assumes
+**Verify this in week one with one command from the host.** Everything downstream of ingestion assumes
 it.
 
 ---
@@ -183,7 +214,7 @@ flowchart TB
         CF["Code folder<br/>latest .txt per bot/process"]
     end
 
-    subgraph Exodus["Exodus jump server — the only host we install on"]
+    subgraph Host["The host — laptop, desktop, VM or server"]
         SC["Scanner<br/>walks date-partitioned tree"]
         WM[("Watermark<br/>last processed position")]
         PR["Path parser<br/>service line / bot / date"]
@@ -198,7 +229,7 @@ flowchart TB
     BR["Amazon Bedrock<br/>Claude Haiku 4.5 / Sonnet 5"]
     SM["Internal SMTP relay"]
     OUT[("Shared folder<br/>HTML reports")]
-    DEV["Developers<br/>no Exodus access needed"]
+    DEV["Developers<br/>no access to the host needed"]
 
     V1 --> SC
     V2 --> SC
@@ -357,9 +388,9 @@ analysis: the diagnosis may be reasoning about code the bot was not running.
 
 ## 5. Component choices
 
-### Application — a single Python service, installed once
+### Application — one Python process
 
-Packaged as a Windows service (or Scheduled Task) on Exodus. One process, one config file, one log.
+Run it by hand, from Task Scheduler or cron, or as a service. One process, one config file, one log.
 
 *Not a distributed system:* there is one host and one reader. Introducing a queue, workers, and a
 control plane here would add operational surface with nothing to show for it.
@@ -372,9 +403,10 @@ comfortably sufficient and needs no server, no backup agent, and no DBA.
 *Not Postgres:* it would be the right answer for the multi-user service in Phase 3, and the schema is
 written to port cleanly. It is the wrong answer for a single-host tool today.
 
-The database file lives on Exodus and holds sanitized logs and analyses, so it inherits the jump
-server's existing access controls and backup regime — which is why §6 of `SECURITY.md` now treats
-Exodus itself as in-scope for the threat model.
+The database holds sanitized logs and analyses, so it inherits whatever access control and backup the
+host has — which is why `SECURITY.md` treats **the host, whichever it is**, as in scope for the
+threat model. A laptop and a managed server are very different in that respect, and the choice of
+host is therefore a security decision (`SECURITY.md` §11a).
 
 ### Queue — none
 
@@ -391,20 +423,20 @@ analyze_text(log, code)                -> Analysis
 analyze_with_vision(log, code, image)  -> Analysis
 ```
 
-Bedrock model IDs carry the `anthropic.` prefix (`anthropic.claude-sonnet-5`). If Exodus turns out to
+Bedrock model IDs carry the `anthropic.` prefix (`anthropic.claude-sonnet-5`). If a host turns out to
 have no egress (§1), this module is the only thing that changes.
 
 ### Output — email first, reports second
 
-- **Email via the internal relay**, to the developer responsible for the bot. Reaches people who
-  never touch Exodus, which is the whole point.
+- **Email via the internal relay**, to the developer responsible for the bot. Reaches people who have
+  no access to the analyzer's host, which is the whole point.
 - **HTML report per failure** written to a shared folder, linked from the email.
 - Screenshot is **never embedded** — the report links to the UNC path, so the estate's existing file
   ACLs decide who can open it.
 
-*Not a web UI in Phase 1:* a web app on a jump server that has to be logged into serves almost
-nobody. Static reports on a share reach everyone today. The UI arrives in Phase 3 alongside a host
-that stays up.
+*Not a web UI in Phase 1:* a web app is only useful from a host that stays up and that people can
+reach, which may not be where this first runs. Static reports on a share reach everyone today. The
+UI arrives in Phase 3 alongside an always-on host.
 
 ---
 
@@ -423,7 +455,7 @@ that stays up.
 | 8b | Miss → triage, then deep analysis | Budget guard checked **before** each call |
 | 9 | `model_gateway` → Bedrock | Prompt asserts inputs are untrusted data, not instructions |
 | 10 | Response schema-validated | Malformed → safe fallback, never a fabricated diagnosis |
-| 11 | Analysis stored in SQLite | On Exodus, under its access controls |
+| 11 | Analysis stored in SQLite | On the host, under its access controls and disk encryption |
 | 12 | Email + HTML report emitted | Diagnosis text only; screenshot by link |
 | 13 | Developer opens the screenshot if needed | Existing share ACLs apply — unchanged from today |
 
@@ -446,7 +478,7 @@ that stays up.
 | Malformed model output | One repair retry, then a fallback record stating analysis was inconclusive. |
 | Budget exhausted | Stop new analyses; dedup hits and template responses continue. |
 | Email relay down | Report still written to the share; email retried next run. |
-| Exodus logged out for a day | Catch-up scan on next start processes the backlog (§4.3). |
+| Host asleep, off, or logged out for a day | Catch-up scan on next start processes the backlog (§4.3). |
 
 ### Fails hard
 
@@ -454,7 +486,7 @@ that stays up.
 |---|---|---|
 | Sanitizer raises | Abort that failure, log the path, continue | Better to skip one than to store unsanitized PII |
 | SQLite unwritable | Stop the run | Advancing a watermark we cannot record means silent data loss |
-| Config points at a writable VM share path | Refuse to start | The analyzer must be read-only against the estate; catch it at boot |
+| Config points at a writable source path | Refuse to start | The analyzer must be read-only against the estate; catch it at boot |
 | Code folder path resolves outside its configured root | Refuse | Guards against a path-traversal bug reading arbitrary files |
 
 ---
@@ -482,12 +514,13 @@ docs/
 
 ## 9. Open architectural questions
 
-1. **Can Exodus reach Bedrock over outbound HTTPS?** The blocker. One command settles it (§1).
+1. **Can the chosen host reach a model endpoint over outbound HTTPS?** The blocker, and it needs
+   checking per host. One command settles it (§1).
 2. **How are a log and its screenshot paired within a date folder?** Needs one real directory
    listing. Determines whether screenshots are usable at all (§4.4).
 3. **What is the code folder's naming convention**, and how does `bot_number` map to a file (§4.5)?
-4. **Does the analyzer run with a service account, or only in an interactive session?** Changes
-   scheduling but not the design — the catch-up scan covers both.
+4. **Which hosts will this be installed on, and does any of them stay up?** Decides whether
+   scheduled runs are useful and whether a shared dedup cache is worth configuring (§1).
 5. **Who keeps the code folder current, and how often does it drift?** Sets how much to trust the
    code input, and whether the staleness flag will fire constantly.
-6. **Does the internal SMTP relay accept mail from Exodus** without a new firewall rule?
+6. **Does the internal SMTP relay accept mail from the hosts you choose** without a new rule?
