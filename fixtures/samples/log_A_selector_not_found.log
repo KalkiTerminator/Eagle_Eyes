@@ -1,0 +1,45 @@
+=========================================================================
+ iBot Runtime 7.4.2  |  Execution Log
+=========================================================================
+Process      : AP_RemittancePosting
+BotNumber    : BOT201
+ServiceLine  : FINANCE_AP
+Machine      : VM-FIN-14
+RunId        : 20260911-4c81de
+QueueItem    : 8842137
+Started      : 11-09-2026 09:14:22.318
+-------------------------------------------------------------------------
+11-09-2026 09:14:22.318 [INFO ] [T:01] Runtime initialised (v7.4.2, .NET 4.8.9256.0)
+11-09-2026 09:14:22.402 [INFO ] [T:01] Queue item 8842137 dequeued (BatchId=4471)
+11-09-2026 09:14:22.418 [DEBUG] [T:01] Working directory D:\ibot\work\BOT201
+11-09-2026 09:14:23.905 [INFO ] [T:01] LaunchApp: C:\Apps\PolCore\polcore.exe (pid 7312)
+11-09-2026 09:14:31.226 [INFO ] [T:01] Window found: 'PolCore - Sign In'
+11-09-2026 09:14:31.240 [INFO ] [T:01] GetCredential: VAULT:SVC_POLCORE_BOT ok
+11-09-2026 09:14:33.882 [INFO ] [T:01] Login submitted for SVC_POLCORE_BOT
+11-09-2026 09:14:39.107 [INFO ] [T:01] Window found: 'PolCore - Main'
+11-09-2026 09:14:39.550 [INFO ] [T:01] OpenWorkbook: D:\ibot\input\batch_4471\remittance_4471.xlsx
+11-09-2026 09:14:42.771 [INFO ] [T:01] ReadRange Sheet1!A2:H5000 -> 318 rows
+11-09-2026 09:14:42.774 [INFO ] [T:01] Beginning ForEach over 318 rows
+11-09-2026 09:14:42.780 [INFO ] [T:01] --- row 1/318 | PolicyRef=POL-448192 | Amount=1240.55
+11-09-2026 09:14:44.019 [INFO ] [T:01] Click tabPolicy ok
+11-09-2026 09:14:46.553 [INFO ] [T:01] Posted POL-448192
+11-09-2026 09:14:46.559 [INFO ] [T:01] --- row 2/318 | PolicyRef=POL-448193 | Amount=88.00
+11-09-2026 09:14:48.114 [INFO ] [T:01] Posted POL-448193
+[... 210 rows elided by log rotation ...]
+11-09-2026 09:41:02.664 [INFO ] [T:01] --- row 213/318 | PolicyRef=POL-448404 | Amount=17655.20
+11-09-2026 09:41:04.881 [WARN ] [T:01] UI element not found on attempt 1/3, retrying in 2000ms
+11-09-2026 09:41:04.881 [WARN ] [T:01]   selector: <wnd app='polcore.exe' cls='WindowsForms10.Window.8.app.0.141b42a_r6_ad1' ctrlname='tabPolicy' idx='12' />
+11-09-2026 09:41:07.002 [WARN ] [T:03] HeartbeatService: orchestrator ping 412ms
+11-09-2026 09:41:07.115 [WARN ] [T:01] UI element not found on attempt 2/3, retrying in 2000ms
+11-09-2026 09:41:09.338 [WARN ] [T:01] UI element not found on attempt 3/3, giving up  
+11-09-2026 09:41:09.341 [ERROR] [T:01] Activity 'ClickPolicyTab' failed after 3 attempts
+11-09-2026 09:41:09.344 [ERROR] [T:01] iBot.Core.ElementNotFoundException: Could not find UI element matching selector '<wnd app='polcore.exe' cls='WindowsForms10.Window.8.app.0.141b42a_r6_ad1' ctrlname='tabPolicy' idx='12' />' within 15000ms. The application may have navigated away, or the control index may have shifted.
+   at iBot.UiAutomation.Locator.Find(Selector sel, Int32 timeoutMs) in C:\build\ibot\src\UiAutomation\Locator.cs:line 418
+   at iBot.Activities.Ui.ClickActivity.Execute(ActivityContext context) in C:\build\ibot\src\Activities\Ui\ClickActivity.cs:line 92
+   at iBot.Runtime.RetryScope.Execute(ActivityContext context, Int32 attempt) in C:\build\ibot\src\Runtime\RetryScope.cs:line 147
+   at iBot.Runtime.Sequence.RunNext(ActivityContext context, Int32 step) in C:\build\ibot\src\Runtime\Sequence.cs:line 233
+   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
+11-09-2026 09:41:09.402 [INFO ] [T:01] Screenshot captured: D:\ibot\data\FINANCE_AP\BOT201\2026\09\11\logs\user logs\screenshot\BOT201_20260911_094109_20260911-4c81de.png
+11-09-2026 09:41:09.407 [ERROR] [T:01] Queue item 8842137 marked Failed (row 213 of 318)
+11-09-2026 09:41:10.881 [INFO ] [T:01] CloseApp polcore.exe (pid 7312)
+11-09-2026 09:41:10.903 [INFO ] [T:01] Run terminated with status FAILED after 00:26:48

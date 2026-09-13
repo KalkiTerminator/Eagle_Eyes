@@ -61,7 +61,9 @@ structured fields whenever they are present.
 
 The fingerprint hashes a normalized tuple of:
 
-1. **Exception type**, fully qualified, as iBot reports it (e.g. `iBot.Core.ElementNotFoundException`)
+1. **Exception type**, fully qualified — **the innermost one**. .NET wraps: iBot's retry scope reports
+   `iBot.Core.ActivityException ---> System.Runtime.InteropServices.COMException`. Unwrap the
+   `--->` chain and fingerprint on the *last* type, not the first (§2.2a)
 2. **Normalized error message** — first 200 chars after normalization
 3. **Top 5 stack frames**, each reduced to `module.function` — **line numbers dropped**
 4. **Code location** — `repo + file path + enclosing function` — **not line number**
@@ -77,6 +79,33 @@ The fingerprint hashes a normalized tuple of:
 | Machine / VM name | Same failure on a different bot VM is the same failure. Stored on the row for ops triage, never in the hash. |
 | Screenshot content | Images of the same failure differ pixel-wise (cursor, clock, window position). Perceptual hashing was considered and rejected: it adds a failure mode without improving a hit rate that text already captures well. |
 
+### 2.2a Unwrap the exception chain first
+
+Realistic iBot logs (`fixtures/samples/`) showed that retry-wrapped failures report an outer type
+that says nothing about the cause:
+
+```
+iBot.Core.ActivityException: Activity 'OpenRemittanceWorkbook' failed after 2 attempts.
+   ---> System.Runtime.InteropServices.COMException (0x800A03EC): Microsoft Excel is waiting …
+   --- End of inner exception stack trace ---
+```
+
+Fingerprinting on the outer type makes **every retry-wrapped failure in the estate the same
+exception type**. An Excel COM hang and a locked-file `IOException` both become
+`iBot.Core.ActivityException`, differing only by whatever survives in the message. Since iBot wraps
+anything inside a `RetryScope` — which is most activities that touch a UI or a file — this would
+have flattened a large fraction of all failures into one bucket.
+
+**Rule: split on ` ---> `, take the last segment, and use that type.** Keep the outer type as a
+separate stored field; it is useful context for the analysis prompt, but it is not identity.
+
+Two details that follow from real .NET output:
+
+- `--- End of inner exception stack trace ---` separates the inner frames from the outer ones. The
+  frames *above* that marker are the ones near the actual fault, so prefer them when selecting the
+  top five.
+- Chains can nest more than two deep. Split on every ` ---> `, not just the first.
+
 ### 2.3 Normalization rules, in order
 
 | Pattern | Replacement |
@@ -84,15 +113,34 @@ The fingerprint hashes a normalized tuple of:
 | ISO-8601 timestamps, epoch millis | `<TS>` |
 | UUIDs / GUIDs | `<UUID>` |
 | Hex runs ≥ 8 chars | `<HEX>` |
-| `0x...` addresses | `<ADDR>` |
+| `0x…` **memory addresses only** — bare, in stack frames | `<ADDR>` |
+| `0x…` **HRESULTs** — inside parentheses after an exception name, e.g. `COMException (0x800A03EC)` | **kept, never normalized** (see below) |
 | IPv4 / IPv6 + port | `<IP>` |
 | Windows, UNC, POSIX paths | `<PATH>/basename` — basename kept |
 | Integers ≥ 4 digits, **including when glued to a unit suffix** — `(?<!\d)\d{4,}(?!\d)`, *not* `\b\d{4,}\b` | `<NUM>` |
 | Currency amounts | `<AMT>` |
 | Quoted literals > 24 chars | `<STR>` |
 | RPA selectors: dynamic `idx`/`tableRow` attrs | attribute dropped, rest kept |
+| **Line endings — normalize CRLF → LF before anything else** | — |
 | Whitespace runs | single space |
 | Case | lowercased *after* all above |
+
+**Never normalize an HRESULT.** The blanket rule `0x[0-9A-Fa-f]+ → <ADDR>` looks harmless and
+destroys the single most diagnostic token in a COM failure. `COMException (0x800A03EC)` (Excel busy
+with an OLE action) and `COMException (0x80010105)` (the server threw an exception) are different
+faults with different fixes, and the rule collapses them into one fingerprint — verified against
+`fixtures/samples/log_B_excel_com_timeout.log`.
+
+COM failures are common in RPA, because RPA drives Office and legacy desktop applications through
+exactly this interface. Match memory addresses narrowly (bare `0x…` in a stack frame) and leave
+anything in `ExceptionName (0x…)` position alone.
+
+**Read files with universal newlines.** iBot writes CRLF. `text.split("\n")` leaves a stranded `\r`
+on every line, and a regex capturing to end-of-line captures it too — so the message that gets hashed
+is `"...boom\r"`, not `"...boom"`. The whitespace rule happens to mask this inside a string, but the
+exception *type* and any field captured before whitespace collapsing carry the CR into the hash. The
+same failure read on two platforms then fingerprints differently. Open with `newline=None` (Python's
+default for text mode) or strip explicitly; do not rely on the whitespace rule to save you.
 
 **Use lookarounds, not `\b`, for the integer rule.** There is no word boundary between a digit and a
 letter, so `\b\d{4,}\b` silently fails to match `15000ms`, `30000ms`, `4096KB` — any number glued to

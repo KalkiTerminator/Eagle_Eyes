@@ -1,0 +1,30 @@
+iBot Process Export
+Process    : AP_RemittancePosting
+Version    : (not shown in designer)
+Exported   : 11-Sep-2026 09:14 by P.Sharma
+Service Line: FINANCE_AP
+
+Step	Action	Target	Value	Timeout	OnError
+1	Comment	--	Start of remittance posting run	--	--
+2	LaunchApp	C:\Apps\PolCore\polcore.exe	--	60000	Abort
+3	WaitWindow	<wnd app='polcore.exe' title='PolCore - Sign In' />	--	30000	Retry(3,5000)
+4	GetCredential	VAULT:SVC_POLCORE_BOT	--	10000	Abort
+5	SetText	<wnd app='polcore.exe' cls='WindowsForms10.EDIT' ctrlname='txtUser' />	$Cred.User	5000	Retry(2,2000)
+6	SetText	<wnd app='polcore.exe' cls='WindowsForms10.EDIT' ctrlname='txtPass' />	$Cred.Password	5000	Retry(2,2000)
+7	Click	<wnd app='polcore.exe' ctrlname='btnLogin' />	--	5000	Retry(3,3000)
+8	WaitWindow	<wnd app='polcore.exe' title='PolCore - Main' />	--	45000	Abort
+9	OpenWorkbook	D:\ibot\input\batch_$BatchId\remittance_$BatchId.xlsx	--	30000	Abort
+10	ReadRange	Sheet1!A2:H5000	--	--	Continue
+11	ForEach	$Rows	--	--	--
+12	  SetTransactionStatus	--	InProgress	--	--
+13	  Click	<wnd app='polcore.exe' ctrlname='tabPolicy' idx='12' />	--	15000	Retry(3,2000)
+14	  SetText	<wnd app='polcore.exe' ctrlname='txtPolicyRef' />	$Row.PolicyRef	5000	Retry(2,1000)
+15	  Click	<wnd app='polcore.exe' ctrlname='btnSearch' />	--	15000	Retry(3,2000)
+16	  WaitElement	<wnd app='polcore.exe' ctrlname='gridResults' />	--	20000	Retry(2,3000)
+17	  SetText	<wnd app='polcore.exe' ctrlname='txtAmount' />	$Row.Amount	5000	Abort
+18	  Click	<wnd app='polcore.exe' ctrlname='btnPost' />	--	15000	Retry(3,2000)
+19	  WaitElement	<wnd app='polcore.exe' title='Posting complete' />	--	30000	Retry(2,5000)
+20	  SetTransactionStatus	--	Success	--	--
+21	EndForEach	--	--	--	--
+22	CloseApp	polcore.exe	--	15000	Continue
+23	OnError	--	CaptureScreenshot + LogError + Throw	--	--
