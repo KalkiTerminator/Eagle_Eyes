@@ -25,5 +25,5 @@ Started      : 11-09-2026 06:30:01.117
    at iBot.Processes.Claims.CLM_ClaimIntake.FillClaimHeader(Claim claim) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 61
    at iBot.Processes.Claims.CLM_ClaimIntake.Execute(QueueItem item) in C:\ibot\processes\Claims\CLM_ClaimIntake.cs:line 38
    at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
-11-09-2026 06:30:24.820 [INFO ] Screenshot captured
+11-09-2026 06:30:24.820 [INFO ] Screenshot captured: D:\ibot\data\CLAIMS_PROC\BOT101\2026\09\11\logs\user logs\screenshot\2026-09-11_06-30-24.png
 11-09-2026 06:30:26.010 [INFO ] Run terminated with status FAILED after 00:00:24

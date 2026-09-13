@@ -32,6 +32,6 @@ Started      : 11-09-2026 09:14:22.318
    at iBot.Processes.Finance.AP_RemittancePosting.PostSingleRemittance(String policyRef, String amount, Int32 rowNo, Int32 total) in C:\ibot\processes\Finance\AP_RemittancePosting.cs:line 78
    at iBot.Processes.Finance.AP_RemittancePosting.Execute(QueueItem item) in C:\ibot\processes\Finance\AP_RemittancePosting.cs:line 52
    at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\build\ibot\src\Runtime\Engine.cs:line 611
-11-09-2026 09:41:09.402 [INFO ] Screenshot captured
+11-09-2026 09:41:09.402 [INFO ] Screenshot captured: D:\ibot\data\FINANCE_AP\BOT201\2026\09\11\logs\user logs\screenshot\2026-09-11_09-41-09.png
 11-09-2026 09:41:09.407 [ERROR] Queue item 8842137 marked Failed
 11-09-2026 09:41:10.903 [INFO ] Run terminated with status FAILED after 00:26:48

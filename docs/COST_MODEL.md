@@ -232,6 +232,10 @@ them primarily cost:
 2. **Latency.** Image processing and transfer add seconds per call.
 3. **Quality.** An irrelevant screenshot is a distraction that can degrade a diagnosis.
 
+One risk that has now closed: attaching the *wrong* screenshot. The log names the file it captured,
+so the image sent with an analysis is the one that failure produced (`ARCHITECTURE.md` §4.4). The
+vision path's main correctness hazard was never its cost.
+
 **Build the gate. Justify it as a privacy and quality control. Do not present it to leadership as
 the cost story — dedup is the cost story, and the numbers back that up.**
 

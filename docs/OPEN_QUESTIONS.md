@@ -86,9 +86,9 @@ The share layout is known:
 — which gives service line, bot number and date structurally, with no content parsing. What remains
 is what happens *inside* a date folder.
 
-| ✅ D5 | ~~How are a log and its screenshot paired?~~ **Answered: timestamp only** — filenames are `2026-09-11_09-41-09.png`, no run ID. Pairing rule and refusal-on-ambiguity in `ARCHITECTURE.md` §4.4. | — | — |
-| 🟡 D5a | **Does the log line record the screenshot filename?** If so, pairing is exact and the refusal rule stops mattering. | No — timestamp only | iBot team |
-| 🟡 D5b | **Does a failing run stop at the first error, or catch per item and continue?** Continuing produces bursts of screenshots and makes timestamp pairing much harder. | Stops at first error | iBot team |
+| ✅ D5 | ~~How are a log and its screenshot paired?~~ **Answered: the log names the file.** Filenames are date-time only, but the capture line carries the path, so pairing is exact (`ARCHITECTURE.md` §4.4). | — | — |
+| ✅ D5a | ~~Does the log record the screenshot filename?~~ **Answered: yes.** Pairing is exact. Use the basename — the logged path is the VM's local drive, not the share (`ARCHITECTURE.md` §4.4). | — | — |
+| ⚪ D5b | **Does a failing run stop at the first error, or catch per item and continue?** Much less critical now pairing is exact, but it still sets how many failures one run yields. | Stops at first error | iBot team |
 | 🔴 D7 | **How does `bot_number` map to a file in the code folder?** Exact name, prefix, per-service-line subfolder? | `{bot_number}.txt` — needs confirming | PO / RPA ops |
 | 🟡 D10 | **Is browser version pinned, or does Chrome auto-update on the bot VMs?** Auto-update is handled by normalization now, but a pinned fleet also removes a class of `SessionNotCreatedException` failures. | Auto-updates | RPA ops / IT |
 | 🟡 D1 | What is iBot's log format and rotation policy? | Text, one file per run | iBot team |
@@ -135,8 +135,9 @@ Things I decided because there was no one to ask. Each is a place the design cou
 14. **The code folder's `.txt` files are current enough to reason about.** Manually maintained, with
     no version control and no record of which version a bot was running. Mitigated by an mtime
     staleness flag, not solved (`ARCHITECTURE.md` §4.5).
-15. **Log and screenshot can be paired inside a date folder.** If it is timestamp proximity only,
-    concurrent failures mismatch and we attach nothing rather than guess (D5).
+15. **Every failure log reaches its `Screenshot captured:` line.** A crash mid-capture, an older
+    iBot build, or a truncated file would skip it and fall back to timestamp matching. Tracked via
+    the `pairing_method` distribution.
 16. **iBot's log format is stable across versions.** If it drifts, the fingerprint's normalization
     breaks silently — exactly what `DATA_MODEL.md` §2.5 versioning exists for.
 17. **SMB reads from Exodus are fast enough** to walk a day's folders for all pilot bots in a

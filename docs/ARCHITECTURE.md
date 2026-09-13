@@ -232,46 +232,61 @@ survive restarts, because the jump server is logged out routinely. On startup th
 from the watermark rather than starting from now — without this, every overnight failure is lost the
 first time nobody logs in.
 
-### 4.4 Correlation — timestamp only, confirmed
+### 4.4 Correlation — the log names the screenshot
 
-Screenshot filenames carry **a date and time and nothing else**:
+**The log records the screenshot path at capture time:**
 
 ```
-2026-09-11_09-41-09.png
-2026-09-11_10-02-51.png
-2026-09-11_10-03-04.png
+11-09-2026 09:41:09.402 [INFO ] Screenshot captured: D:\ibot\data\FINANCE_AP\BOT201\2026\09\11\logs\user logs\screenshot\2026-09-11_09-41-09.png
 ```
 
-There is no run ID, so pairing is the fragile case flagged in earlier drafts. It is workable, but
-only with explicit guard rails.
+This is the outcome worth having. Pairing is **exact** — stated by the process that wrote both files —
+rather than inferred from a clock. The "two failures seconds apart get mismatched" risk that shaped
+earlier drafts does not arise on the primary path, and a mismatched screenshot producing a confident
+analysis of the wrong screen stops being a live concern.
 
-**What makes it workable:** the log records the capture with its own timestamp
-(`09:41:09.402 [INFO] Screenshot captured`), and both are written by the same process moments apart.
-Matching the filename's timestamp to that log line is precise to the second.
+The filenames themselves still carry only a date and time (`2026-09-11_09-41-09.png`), which is
+exactly why the log line matters.
 
-**What makes it risky:** nothing in the filename identifies the run. Two failures close together on
-one bot produce two screenshots that only the clock distinguishes — and a mismatched screenshot
-yields an analysis of the wrong screen, stated with full confidence. That is the failure mode this
-project can least afford.
+#### Take the basename, not the path
 
-**The rule:**
+The logged path is **the bot VM's local path**. We read over the share:
 
-1. Find the `Screenshot captured` line in the log and take its timestamp `T`.
-2. Consider screenshots in that date folder with a filename timestamp in `[T − 2s, T + 10s]`
-   (asymmetric: the file is written *after* the log line, never meaningfully before).
-3. Exactly one candidate → attach it, `pairing_method = 'timestamp'`.
-4. More than one → **attach nothing.** Analyse text-only and record `pairing_method = 'none'`.
-5. No `Screenshot captured` line → attach nothing.
+```
+logged by iBot :  D:\ibot\data\FINANCE_AP\BOT201\2026\09\11\...\screenshot\2026-09-11_09-41-09.png
+read by us     :  \\VM-FIN-14\Network_Sharing_Folder\data\FINANCE_AP\BOT201\2026\09\11\...\2026-09-11_09-41-09.png
+```
 
-Rule 4 is the important one. **Refusing to pair is cheap; pairing wrongly is not.** Track the
-refusal rate as a metric — if it is more than a few percent, that is the evidence for asking the
-iBot team to put the run ID in the filename, which would make this exact.
+Opening the logged path directly fails — `D:` is a drive on a machine we are not running on. The
+root differs by design: the estate shares what was a local folder under a different name.
 
-One thing that reduces the risk in practice: the sample processes rethrow from `OnError`, so a run
-terminates at its first failure. One failure per run means one screenshot per run, and consecutive
-runs are usually seconds to minutes apart rather than milliseconds. **Verify this holds** — a
-process that catches per-item and continues would produce a burst of screenshots and push the
-refusal rate up sharply.
+**Rule: extract the basename and resolve it inside the date folder already being scanned.** The
+scanner knows the service line, bot and date from the path it walked (§4.2), so the basename is
+sufficient and is immune to drive letters, root renames and any future re-share. Do not attempt to
+rewrite the prefix — a mapping table is one estate change away from being wrong, and a basename
+never is.
+
+Assert the logged path's *tail* matches the folder being scanned (service line, bot, date). A
+mismatch means something is wrong with the assumptions and should be recorded, not silently
+accepted.
+
+#### The rule
+
+1. Find `Screenshot captured:` in the log, take the basename of the path it names.
+2. Resolve that basename in the date folder's `screenshot/` directory →
+   `pairing_method = 'log_path'`. **This is the normal path.**
+3. Named but not present on the share (rotation, a failed write, a partial sync) → attach nothing,
+   `pairing_method = 'none'`, and count it. A rising rate here means the share is lagging or
+   screenshots are being pruned faster than we scan.
+4. No capture line at all → fall back to the timestamp window: screenshots in `[T − 2s, T + 10s]`,
+   attach only if exactly one candidate, otherwise attach nothing.
+5. Never guess between two candidates.
+
+Rule 4 exists because a log may not always reach the capture line — a crash during screenshot
+writing, an older iBot build, a truncated file. It is a genuine fallback, not the design.
+
+**Track the distribution of `pairing_method`.** If `log_path` is not the overwhelming majority in
+Phase 1, an assumption is wrong and the vision input is less reliable than this section claims.
 
 ### 4.5 Code, and the drift problem
 

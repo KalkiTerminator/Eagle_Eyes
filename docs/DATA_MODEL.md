@@ -416,7 +416,9 @@ CREATE TABLE failure (
     code_path            TEXT,
     code_mtime           TEXT,
     code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
-    pairing_method       TEXT CHECK (pairing_method IN ('run_id','log_body','timestamp','none')),
+    -- 'log_path' is the normal case: the log names the screenshot file (ARCHITECTURE 4.4).
+    -- 'timestamp' is the fallback when no capture line exists; 'none' means we refused to guess.
+    pairing_method       TEXT CHECK (pairing_method IN ('log_path','timestamp','none')),
 
     log_sanitized        TEXT,              -- nulled at 90 days
     code_snapshot        TEXT,              -- nulled at 90 days

@@ -15,8 +15,9 @@ Two facts, confirmed, that reshaped the design:
 1. **Bots are C#/.NET driving Selenium**, with some JavaScript executed through
    `IJavaScriptExecutor`. This is **web automation**, not Windows-desktop automation — an entirely
    different failure taxonomy from the one the first draft assumed.
-2. **Screenshot filenames carry a date and time only** — `2026-09-11_09-41-09.png`. No run ID, so
-   pairing a screenshot to a log depends on the clock (`ARCHITECTURE.md` §4.4).
+2. **Screenshot filenames carry a date and time only** — `2026-09-11_09-41-09.png`, no run ID —
+   **but the log names the file at capture time.** Pairing is therefore exact, not clock-based
+   (`ARCHITECTURE.md` §4.4).
 
 Earlier samples modelled a low-code Windows-desktop tool. They were wrong and have been deleted.
 
@@ -82,15 +83,26 @@ developers wanting the screenshot here anyway, that is cheap to change — `COST
 
 ---
 
+### The logged path is the VM's, not ours
+
+The log names the screenshot with the **bot VM's local path**:
+
+```
+Screenshot captured: D:\ibot\data\FINANCE_AP\BOT201\2026\09\11\...\2026-09-11_09-41-09.png
+```
+
+We read over the share, where the same file is `\\VM-FIN-14\Network_Sharing_Folder\data\...`.
+Opening the logged path directly fails — `D:` is a drive on a machine we are not running on.
+
+Take the **basename** and resolve it in the date folder already being scanned. A prefix-rewriting
+map would work today and break the next time the estate re-shares a folder; a basename never does.
+
 ## Still unknown
 
-1. **Does the real log record the screenshot filename?** These samples log `Screenshot captured`
-   with a timestamp only, matching the date-time filenames. If the real log names the file, pairing
-   becomes exact and the refusal rule in `ARCHITECTURE.md` §4.4 stops mattering.
-2. **Real timestamp format, log level names, and encoding** (UTF-8 vs UTF-16 vs a code page).
-3. **Whether a failing run stops at the first error** or catches per item and continues. The sample
-   processes rethrow, so one run produces one screenshot — if real ones continue, screenshots arrive
-   in bursts and timestamp pairing gets much harder.
+1. **Real timestamp format, log level names, and encoding** (UTF-8 vs UTF-16 vs a code page).
+2. **Whether a failing run stops at the first error** or catches per item and continues. The sample
+   processes rethrow, so one run produces one screenshot. This matters much less now that pairing
+   reads the filename from the log, but it still affects how many failures a single run produces.
 
-One real log file, sanitized by hand and reviewed before it leaves the estate, answers all three
+One real log file, sanitized by hand and reviewed before it leaves the estate, answers both
 (`OPEN_QUESTIONS.md` D1; the permitted exception in `SECURITY.md` §11).
