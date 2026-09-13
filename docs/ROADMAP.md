@@ -14,7 +14,8 @@ reviewer (part-time), **PO** you.
 |---|---|---|
 | Take `SECURITY.md` §9 to EXL security; get Q1, Q2, Q5, Q8 answered | PO | — |
 | Confirm Bedrock data-handling terms against the client contract, in writing | PO + Sec | — |
-| **Confirm Exodus can reach Bedrock over outbound HTTPS** — one command from the jump server | DevOps + Network | 0.1 |
+| **Confirm Bedrock reachability** — `tools/check_bedrock.py`, on a dev account now and on Exodus when access lands | BE + DevOps | 0.1 |
+| **Stand up the local sandbox** — `tools/make_fixtures.py`, real Bedrock against synthetic data. Unblocked today; needs no sign-off. | BE | 0.2 |
 | **Get one real directory listing** from a VM share date folder + one sanitized sample log | PO | 0.1 |
 | **Confirm the log↔screenshot pairing convention** from that sample (run ID? filename? timestamp only?) | PO + iBot team | — |
 | Confirm the code folder's naming convention and how `bot_number` maps to a file | PO | — |

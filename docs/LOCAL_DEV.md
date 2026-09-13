@@ -1,8 +1,16 @@
 # Eagle Eyes — Local Development
 
-The client has AWS Bedrock. Until the real environment is available, **the client environment is
-simulated on a personal machine**: local folders stand in for the VM network shares and the code
-folder.
+The client has AWS Bedrock. Until the real environment is available, development runs with **real
+Bedrock calls against a wholly synthetic estate**: local folders stand in for the VM network shares
+and the code folder, and every log, screenshot and code file is fabricated.
+
+That combination is deliberate, and it is the best of the available options:
+
+- **Real model behaviour.** Diagnosis quality, latency, token counts and cost are measured, not
+  guessed. Prompt work against a mock teaches you nothing about whether the answers are any good.
+- **Zero data-governance exposure.** Nothing real ever leaves anything. No client PII, no client
+  code, no client screens. **This setup needs no security sign-off to run**, which is why it can
+  start today while the questions in `SECURITY.md` §9 are still open.
 
 ---
 
@@ -37,7 +45,14 @@ code_root:     ./sandbox/code_folder
 database:      ./sandbox/eagle_eyes.db
 reports_out:   ./sandbox/reports
 model:
-  backend: mock          # mock | bedrock
+  backend: bedrock       # real calls, synthetic inputs
+  region:  us-east-1
+  triage:  anthropic.claude-haiku-4-5
+  deep:    anthropic.claude-sonnet-5
+budget:
+  daily_usd:    2.00     # far below production; see section 4
+  per_run_usd:  0.50
+  single_call_usd: 0.05
 notify:
   backend: log           # log | smtp
 screenshot_mode: 0
@@ -105,42 +120,72 @@ plausible implementation quietly does the wrong thing.
 
 ---
 
-## 4. Running without AWS credentials
+## 4. Bedrock: real calls, synthetic inputs
 
-`model.backend: mock` returns canned, schema-valid responses. The full pipeline — scan, correlate,
-sanitize, fingerprint, dedup, route, render, notify — runs end to end with no credentials, no
-network and no cost.
+### Check it works before building on it
 
-This is not only a convenience. Per the build kit's requirement, **routing, the escalation gate,
-fallback behaviour and cost accounting must all be testable without a network call.** The mock
-backend is how that requirement is met, and CI uses it exclusively.
+```bash
+pip install 'anthropic[bedrock]'
+python3 tools/check_bedrock.py --region us-east-1
+```
 
-Three backends:
+One small call per model. On failure it names which link is broken — credentials, expired token,
+model access, region, model ID, throttling, or no egress — and what to do about it. Run it again on
+Exodus the day access is granted; that is where it is most likely to report no egress.
+
+**The commonest first-run failure is not a network problem.** Bedrock requires model access to be
+enabled explicitly, **per account and per region**, in the Bedrock console under *Model access*. Until
+you do that you get `AccessDeniedException` even with perfect credentials on a perfectly connected
+machine, and it reads like an IAM problem when it is not.
+
+### Which AWS account
+
+**Use a development account, not client production credentials.**
+
+The data is synthetic, so there is no data-governance issue — but credential provenance is a separate
+question from data provenance. Client production credentials sitting in `~/.aws/credentials` on a
+personal machine is its own exposure, and it is not made acceptable by the fact that you are only
+sending fabricated logs through them. Keep dev spend on a dev account where the bill is also legible.
+
+### Cost, and the one way to get this wrong
+
+Per `COST_MODEL.md` §3, a full triage-plus-deep-analysis journey is about **$0.045**. The sandbox
+holds 244 failures, but dedup collapses them to 14 unique fingerprints — so a correct full run costs
+roughly **$0.60**.
+
+A run with dedup accidentally disabled is ~250 analyses: **about $11**, for identical information.
+
+That gap is the point. **Set the budget guard before the first live run** — the `budget` block above
+caps a local run at $2. It is also a genuinely useful test: if a local run trips the cap, dedup is
+broken, and you have found it for $2 instead of discovering it in production.
+
+### Backends
 
 | Backend | Use |
 |---|---|
-| `mock` | Default. Canned responses keyed by fingerprint. Zero cost. CI runs here. |
-| `record` | Real Bedrock call, response saved to `fixtures/responses/`. Run deliberately, costs money. |
-| `bedrock` | Live. |
+| `bedrock` | **Default for local development.** Real calls, synthetic inputs. |
+| `record` | Real call, response saved to `fixtures/responses/`. Run deliberately. |
+| `mock` | Canned responses. **CI runs here exclusively** — no credentials, no cost, no network. |
 
-`record` then `mock` gives realistic model output in tests without paying on every run. Scrub
-recorded responses before committing — they are derived from whatever went in.
+`mock` is not a lesser fallback; it is a requirement. Per the build kit, routing, the escalation gate,
+fallback behaviour and cost accounting must all be testable without a network call. A test suite that
+needs AWS credentials is a test suite that will be skipped.
 
-### When you do have credentials
+`record` then `mock` gives tests realistic model output without paying on every run.
 
-Bedrock model IDs carry the `anthropic.` prefix. Use the Bedrock client class rather than pointing
-the first-party client at a different base URL:
+### Client code
+
+Use the Bedrock client class rather than pointing the first-party client at a different base URL.
+Model IDs carry the `anthropic.` prefix:
 
 ```python
 from anthropic import AnthropicBedrockMantle
-client = AnthropicBedrockMantle(aws_region="...")   # model: "anthropic.claude-sonnet-5"
+client = AnthropicBedrockMantle(aws_region="us-east-1")
+resp = client.messages.create(model="anthropic.claude-sonnet-5", max_tokens=4096, messages=[...])
 ```
 
-**Set a low budget guard before the first live run.** `COST_MODEL.md` §9 has the production caps; on
-a personal machine set them far lower. A loop over 244 fixture failures with dedup accidentally
-disabled is ~250 deep analyses — around $10, and entirely avoidable.
-
----
+All of this lives behind `model_gateway` (`ARCHITECTURE.md` §5). Nothing else imports the SDK, so the
+day this moves to the client's account — or to a VPC endpoint — one module changes.
 
 ## 5. What local development cannot tell you
 
@@ -155,8 +200,14 @@ Honest limits. Each of these is a real risk that the sandbox actively hides:
 | **Permissions and locked files** | Everything is readable here | On the real share |
 | **Code drift** | Fixture code files are always consistent with the failure | Once real `.txt` files are used |
 | **Real dedup hit rate** | The 94.3% measured here is a property of the generator, not of your estate | Phase 1, against real logs |
+| **Whether diagnoses are actually right** | Bedrock is real, but it is reasoning about invented failures in an invented log format. Quality here says little about quality on real ones. | Pilot feedback |
 
-**That last row deserves emphasis.** The fixtures were built to exercise dedup, so a high hit rate is
+**Two rows deserve emphasis.** The dedup rate is guaranteed high by construction, and the diagnosis
+quality is measured against fiction. Real Bedrock calls make the *mechanism* real — routing, token
+counts, latency, cost, schema validation, fallback behaviour — and none of that is the same as
+knowing the answers are good.
+
+**On the dedup rate specifically:** The fixtures were built to exercise dedup, so a high hit rate is
 guaranteed by construction. It proves the mechanism works; it says nothing about your estate.
 `COST_MODEL.md` §5.2 assumes 65–80% from real-world reasoning, and that assumption stands until
 measured on real logs.

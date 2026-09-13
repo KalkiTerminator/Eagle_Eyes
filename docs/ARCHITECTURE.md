@@ -62,14 +62,16 @@ Two consequences to design around now, cheaply:
 ### Environment profiles
 
 Local development, Exodus and the client environment are the same code with different configuration
-(`LOCAL_DEV.md`). Until the real environment is available, **the client environment is simulated on a
-personal machine** — local folders in place of the shares, a mock model backend in place of Bedrock.
+(`LOCAL_DEV.md`). Until the real environment is available, development runs **real Bedrock calls
+against a wholly synthetic estate** — local folders in place of the shares, fabricated logs,
+screenshots and code. Real model behaviour, and no client data anywhere, so it needs no sign-off to
+begin.
 
 | | `local` | `exodus` / `client` |
 |---|---|---|
 | Shares | `./sandbox/...` | `\\<host>\Network_Sharing_Folder` |
 | Code folder | `./sandbox/code_folder` | `\\<fileserver>\code_folder` |
-| Model | `mock` (no credentials, no cost) | `bedrock` |
+| Model | `bedrock` — **real calls, synthetic inputs** (`mock` in CI) | `bedrock` |
 | Notifications | log to console | SMTP relay |
 
 Nothing branches on the environment name. Every difference is a named setting, so there is no code
@@ -91,7 +93,8 @@ internet entirely and is a far easier approval than open egress; a proxy allowli
 endpoint from that one host; running the analyzer on a neighbouring host that already has egress and
 can reach the same shares; or a self-hosted model, which is a different project.
 
-Local development is unblocked either way — the mock backend needs no network at all.
+`tools/check_bedrock.py` settles it in one command, and names which link is broken when it fails.
+Run it locally now and on Exodus the day access is granted.
 
 **Verify this in week one with one command from Exodus.** Everything downstream of ingestion assumes
 it.
