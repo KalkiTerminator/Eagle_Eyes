@@ -26,6 +26,7 @@ from pathlib import Path
 from .analysis import Engine
 from .cache import SharedCache
 from .discovery import discover, read_text
+from .doctor import report as doctor_report, run_checks
 from .model_gateway import BudgetGuard, create_backend, models_for
 from .notify import Notifier, compose
 from .report import ReportInput, write, write_index
@@ -43,9 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--pick-file", action="store_true", help="choose one log file in a dialog")
     src.add_argument("--target", type=Path, help="analyse this file or folder directly")
 
-    ap.add_argument("--share-root", type=Path, required=True,
+    ap.add_argument("--share-root", type=Path,
                     help="root containing data/<service line>/...")
-    ap.add_argument("--code-root", type=Path, required=True, help="folder of bot code files")
+    ap.add_argument("--code-root", type=Path, help="folder of bot code files")
     ap.add_argument("--yes", action="store_true",
                     help="skip the review and run everything found (for the scheduler)")
     ap.add_argument("--dry-run", action="store_true",
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="apply the retention policy and exit")
     ap.add_argument("--stats", action="store_true",
                     help="show what this database holds and exit")
+    ap.add_argument("--doctor", action="store_true",
+                    help="check whether this machine can run it, and exit")
     ap.add_argument("--reports", type=Path,
                     help="folder for HTML reports (default: the platform data directory)")
     ap.add_argument("--no-reports", action="store_true", help="skip writing reports")
@@ -75,6 +78,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--smtp-host", default="",
                     help="mail relay; without it notifications are rendered, not sent")
     args = ap.parse_args(argv)
+
+    # --doctor runs before anything else touches a path or opens a database:
+    # its whole job is to report on a machine that may not be set up yet.
+    if args.doctor:
+        return doctor_report(run_checks(args.share_root, args.code_root))
+
+    if not args.share_root or not args.code_root:
+        ap.error("--share-root and --code-root are required "
+                 "(run --doctor first if you are setting up)")
 
     principal = Principal.local()
     db = Database(args.db or resolve_paths().ensure().database)

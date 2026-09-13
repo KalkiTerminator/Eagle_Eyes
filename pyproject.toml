@@ -1,0 +1,27 @@
+[project]
+name = "eagle-eyes"
+version = "0.1.0"
+description = "Root-cause analysis for RPA bot failures"
+requires-python = ">=3.10"
+# The core runs on the standard library alone: the mock backend, the whole
+# pipeline and the entire test suite need nothing installed. That is deliberate
+# -- a tool that needs a working pip before it can be tried is a tool that does
+# not get tried on a locked-down desktop.
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]          # real analysis via a direct key
+bedrock = ["anthropic[bedrock]>=0.40"]   # real analysis via AWS Bedrock
+
+[project.scripts]
+eagle-eyes = "eagle_eyes.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["eagle_eyes"]
+
+[tool.setuptools.package-data]
+eagle_eyes = ["schema.sql", "prompts/*.txt", "prompts/*.json"]
