@@ -92,149 +92,172 @@ FAKE_NAMES = [
 # Each template is one distinct root cause. `vision` marks the ones whose
 # diagnosis genuinely needs the screenshot -- the escalation gate in
 # docs/COST_MODEL.md section 6 should agree with this column.
+# Shapes follow fixtures/samples/: C#/.NET driving Selenium.
 TEMPLATES = [
     {
-        "key": "selector",
-        "exc": "iBot.Core.ElementNotFoundException",
-        "msg": "Could not find UI element matching selector "
-               "'<wnd app=\"polcore.exe\" cls=\"WindowsForms10\" idx=\"{idx}\" />' "
-               "after {timeout}ms",
-        "activity": "ClickPolicyTab",
+        "key": "intercepted",
+        "exc": "OpenQA.Selenium.ElementClickInterceptedException",
+        "msg": ("element click intercepted: Element <a data-tab=\"policy\" href=\"#policy\">...</a> "
+                "is not clickable at point ({x}, {y}). Other element would receive the click: "
+                "<div class=\"session-warning-banner\" role=\"alert\">...</div>"),
+        "activity": "PostSingleRemittance",
         "vision": True,
     },
     {
-        "key": "modal",
-        "exc": "iBot.Core.UnexpectedWindowException",
-        "msg": "Unexpected modal dialog blocked interaction: "
-               "'Record locked by {name} (session {sid})'",
-        "activity": "SavePolicyRecord",
+        "key": "stale",
+        "exc": "OpenQA.Selenium.StaleElementReferenceException",
+        "msg": "stale element reference: element is not attached to the page document",
+        "activity": "FillClaimHeader",
+        "vision": False,
+    },
+    {
+        "key": "nosuchelement",
+        "exc": "OpenQA.Selenium.NoSuchElementException",
+        "msg": ("no such element: Unable to locate element: "
+                "{{\"method\":\"css selector\",\"selector\":\"li.attachment-row\"}}"),
+        "activity": "AttachDocuments",
         "vision": True,
+    },
+    {
+        "key": "timeout",
+        "exc": "OpenQA.Selenium.WebDriverTimeoutException",
+        "msg": "Timed out after {timeout} seconds waiting for element to be clickable",
+        "activity": "OpenClaimForm",
+        "vision": True,
+    },
+    {
+        "key": "neterr",
+        "exc": "OpenQA.Selenium.WebDriverException",
+        "msg": "unknown error: net::ERR_CONNECTION_TIMED_OUT loading https://polcore.internal/finance/remittance",
+        "activity": "Navigate",
+        "vision": False,
     },
     {
         "key": "filenotfound",
         "exc": "System.IO.FileNotFoundException",
-        "msg": "Could not find file "
-               "'D:\\ibot\\input\\batch_{batch}\\remittance_{ref}.xlsx'",
-        "activity": "ReadRemittanceFile",
-        "vision": False,
-    },
-    {
-        "key": "credential",
-        "exc": "iBot.Security.CredentialExpiredException",
-        "msg": "Credential 'SVC_POLCORE_BOT' expired at {ts}; "
-               "authentication rejected for endpoint https://polcore.internal:{port}/auth",
-        "activity": "AuthenticateToPolCore",
-        "vision": False,
-    },
-    {
-        "key": "timeout",
-        "exc": "iBot.Core.ApplicationNotRespondingException",
-        "msg": "Application 'polcore.exe' (pid {pid}) stopped responding "
-               "for {timeout}ms while awaiting 'Policy {policy} saved'",
-        "activity": "WaitForSaveConfirmation",
-        "vision": True,
-    },
-    {
-        "key": "sql",
-        "exc": "System.Data.SqlClient.SqlException",
-        "msg": "Timeout expired before completion of "
-               "'usp_GetOpenClaims @ClaimRef={ref}' (conn {sid})",
-        "activity": "FetchOpenClaims",
+        "msg": "Could not find file 'D:\\ibot\\input\\batch_{batch}\\remittance_{ref}.xlsx'",
+        "activity": "ReadRange",
         "vision": False,
     },
 ]
 
 STACK = [
-    "   at iBot.Runtime.ActivityHost.Execute(ActivityContext ctx) in ActivityHost.cs:line {l1}",
-    "   at iBot.Runtime.Sequence.RunNext(Int32 step) in Sequence.cs:line {l2}",
-    "   at iBot.Workflows.{sl}.{act}.Run() in {act}.xaml:line {l3}",
-    "   at iBot.Runtime.Scheduler.Dispatch(Job job) in Scheduler.cs:line {l4}",
+    "   at OpenQA.Selenium.WebDriver.UnpackAndThrowOnError(Response errorResponse, String commandToExecute)",
+    "   at OpenQA.Selenium.WebDriver.Execute(String driverCommandToExecute, Dictionary`2 parameters)",
+    "   at OpenQA.Selenium.WebElement.Click()",
+    "   at iBot.Processes.{ns}.{proc}.{act}(String policyRef) in C:\\ibot\\processes\\{ns}\\{proc}.cs:line {l1}",
+    "   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\\build\\ibot\\src\\Runtime\\Engine.cs:line {l2}",
 ]
 
+CHROME_BUILDS = ["128.0.6613.120", "128.0.6613.138", "129.0.6668.58", "129.0.6668.101"]
 
-def make_log(rng: random.Random, tpl: dict, bot: str, sl: str, when: datetime, run_id: str) -> str:
-    """One iBot-shaped execution log ending in a failure.
 
-    NOTE: this format is a placeholder. Replace it with a real (sanitized)
-    sample before tuning the fingerprint normalization -- see
-    docs/OPEN_QUESTIONS.md D1.
+def make_log(rng: random.Random, tpl: dict, bot: str, sl: str, when: datetime,
+             run_id: str, shot_name: str | None) -> str:
+    """One iBot-shaped C#/Selenium execution log ending in a failure.
+
+    Format follows fixtures/samples/. Still a placeholder: replace it with a
+    real sanitized sample before tuning normalization (docs/OPEN_QUESTIONS.md D1).
     """
+    proc = "AP_RemittancePosting" if sl == "FINANCE_AP" else "CLM_ClaimIntake"
+    ns = "Finance" if sl == "FINANCE_AP" else "Claims"
+    chrome = rng.choice(CHROME_BUILDS)          # varies: the dedup trap, normalized away
+
     msg = tpl["msg"].format(
-        idx=rng.randint(1, 60),
-        timeout=rng.choice([15000, 30000, 45000, 60000]),
-        name=rng.choice(FAKE_NAMES),
-        sid=f"{rng.randrange(16**8):08x}",
+        x=rng.randint(100, 1400), y=rng.randint(100, 900),
+        timeout=rng.choice([10, 20, 30]),
         batch=rng.randint(1000, 9999),
         ref=f"{rng.randrange(16**12):012X}",
-        ts=(when - timedelta(hours=rng.randint(1, 40))).isoformat(timespec="seconds"),
-        port=rng.choice([443, 8443, 9443]),
-        pid=rng.randint(1000, 65000),
-        policy=f"POL-{rng.randint(100000, 999999)}",
     )
     stack = "\n".join(
-        s.format(
-            l1=rng.randint(100, 999), l2=rng.randint(100, 999),
-            l3=rng.randint(10, 400), l4=rng.randint(100, 999),
-            sl=sl.title().replace("_", ""), act=tpl["activity"],
-        )
-        for s in STACK
+        f.format(ns=ns, proc=proc, act=tpl["activity"],
+                 l1=rng.randint(40, 140), l2=rng.randint(500, 700))
+        for f in STACK
     )
-    head = "\n".join(
-        f"{(when - timedelta(seconds=n * 7)).isoformat(timespec='milliseconds')} "
-        f"INFO  [{run_id}] {line}"
-        for n, line in reversed(list(enumerate([
-            "Queue item dequeued", "Application attached: polcore.exe",
-            f"Processing record for {rng.choice(FAKE_NAMES)} "
-            f"(policy POL-{rng.randint(100000, 999999)})",
-            f"Navigating to {tpl['activity']}",
-        ], start=1)))
-    )
+    ts = lambda d: (when + timedelta(seconds=d)).strftime("%d-%m-%Y %H:%M:%S.%f")[:-3]
+    head = "\n".join([
+        f"{ts(-38)} [INFO ] Runtime initialised (v7.4.2, .NET 4.8.9256.0)",
+        f"{ts(-37)} [INFO ] Queue item {rng.randint(8800000, 8899999)} dequeued",
+        f"{ts(-35)} [INFO ] Starting ChromeDriver {chrome} on port {rng.randint(49000, 52000)}",
+        f"{ts(-32)} [INFO ] Chrome session {rng.randrange(16**24):024x} started",
+        f"{ts(-30)} [INFO ] Authenticated as SVC_{sl[:3]}_BOT",
+        f"{ts(-12)} [INFO ] --- item {rng.randint(1, 300)}/318",
+    ])
+    shot_line = ""
+    if shot_name:
+        p = (f"D:\\ibot\\data\\{sl}\\{bot}\\{when:%Y}\\{when:%m}\\{when:%d}"
+             f"\\logs\\user logs\\screenshot\\{shot_name}")
+        shot_line = f"{ts(1)} [INFO ] Screenshot captured: {p}\n"
+
     return (
-        f"=== iBot execution log ===\n"
-        f"Bot        : {bot}\n"
-        f"ServiceLine: {sl}\n"
-        f"RunId      : {run_id}\n"
-        f"Machine    : VM-{sl[:3]}-{rng.randint(10, 99)}\n"
-        f"Started    : {(when - timedelta(seconds=40)).isoformat(timespec='milliseconds')}\n\n"
+        "=========================================================================\n"
+        " iBot Runtime 7.4.2  |  Execution Log\n"
+        "=========================================================================\n"
+        f"Process      : {proc}\n"
+        f"BotNumber    : {bot}\n"
+        f"ServiceLine  : {sl}\n"
+        f"Machine      : VM-{sl[:3]}-{rng.randint(10, 99)}\n"
+        f"RunId        : {run_id}\n"
+        f"Started      : {ts(-40)}\n"
+        "-------------------------------------------------------------------------\n"
         f"{head}\n"
-        f"{when.isoformat(timespec='milliseconds')} ERROR [{run_id}] "
-        f"Activity '{tpl['activity']}' failed\n"
-        f"{when.isoformat(timespec='milliseconds')} ERROR [{run_id}] "
-        f"{tpl['exc']}: {msg}\n{stack}\n"
-        f"{when.isoformat(timespec='milliseconds')} ERROR [{run_id}] "
-        f"Screenshot captured\n"
-        f"{when.isoformat(timespec='milliseconds')} INFO  [{run_id}] Run terminated\n"
+        f"{ts(0)} [ERROR] Activity '{tpl['activity']}' failed\n"
+        f"{ts(0)} [ERROR] {tpl['exc']}: {msg}\n"
+        f"  (Session info: chrome={chrome})\n"
+        f"{stack}\n"
+        f"{shot_line}"
+        f"{ts(2)} [INFO ] Run terminated with status FAILED\n"
     )
 
 
 def make_code(bot: str, sl: str) -> str:
     """Stand-in for code pasted out of iBot into Notepad (no version metadata)."""
-    return f"""' ---------------------------------------------------------------
-' iBot process export  -  {bot}  ({sl})
-' Pasted from the iBot designer. There is no version identifier in
-' this file; the analyzer uses its mtime as a pseudo-version.
-' See docs/ARCHITECTURE.md section 4.5.
-' ---------------------------------------------------------------
+    proc = "AP_RemittancePosting" if sl == "FINANCE_AP" else "CLM_ClaimIntake"
+    ns = "Finance" if sl == "FINANCE_AP" else "Claims"
+    return f"""// -------------------------------------------------------------------
+// Pasted out of the iBot designer -> Notepad -> saved as .txt
+// Process : {proc}   Bot: {bot}   Line: {sl}
+// No version stamp is included in the copy output; the analyzer uses
+// this file's mtime as a pseudo-version (docs/ARCHITECTURE.md 4.5).
+// -------------------------------------------------------------------
 
-Sequence Main
-    Try
-        AttachApplication "polcore.exe"
-        AuthenticateToPolCore(credential := "SVC_POLCORE_BOT")
+using OpenQA.Selenium;
+using OpenQA.Selenium.Chrome;
+using OpenQA.Selenium.Support.UI;
+using iBot.Runtime;
 
-        For Each item In GetQueueItems()
-            ClickPolicyTab(selector := "<wnd app='polcore.exe' idx='12' />")
-            ReadRemittanceFile(path := "D:\\ibot\\input\\batch_" & item.Batch)
-            FetchOpenClaims(claimRef := item.ClaimRef)
-            SavePolicyRecord(item)
-            WaitForSaveConfirmation(timeout := 30000)
-        Next
+namespace iBot.Processes.{ns}
+{{
+    public class {proc} : ProcessBase
+    {{
+        private IWebDriver driver;
+        private WebDriverWait wait;
 
-    Catch ex As Exception
-        LogError(ex)
-        CaptureScreenshot()
-        Throw
-    End Try
-End Sequence
+        public override void Execute(QueueItem item)
+        {{
+            driver = new ChromeDriver(@"C:\\ibot\\drivers");
+            wait = new WebDriverWait(driver, TimeSpan.FromSeconds(30));
+            driver.Navigate().GoToUrl("https://polcore.internal/finance/remittance");
+
+            foreach (var row in LoadRows(item))
+            {{
+                wait.Until(ExpectedConditions.ElementToBeClickable(
+                    By.XPath("//div[@id='policyTabs']//a[@data-tab='policy']"))).Click();
+                driver.FindElement(By.Id("txtPolicyRef")).SendKeys(row.PolicyRef);
+                driver.FindElement(By.Id("btnPost")).Click();
+                wait.Until(ExpectedConditions.ElementIsVisible(
+                    By.XPath("//div[contains(@class,'toast-success')]")));
+            }}
+        }}
+
+        public override void OnError(Exception ex, QueueItem item)
+        {{
+            Log.Error(ex.ToString());
+            Screenshot.Capture(driver);
+            throw;
+        }}
+    }}
+}}
 """
 
 
@@ -273,12 +296,14 @@ def generate(root: Path, seed: int, days: int) -> dict:
         (d / "logs").mkdir(parents=True, exist_ok=True)
         (d / "screenshot").mkdir(parents=True, exist_ok=True)
         run_id = f"{when:%Y%m%d}-{rng.randrange(16**6):06x}"
-        (d / "logs" / f"{bot}_{when:%Y%m%d_%H%M%S}_{run_id}.log").write_text(
-            make_log(rng, tpl, bot, sl, when, run_id), encoding="utf-8")
+        # Screenshot filenames are date-time only, as confirmed for the real estate.
+        shot_name = f"{when + timedelta(seconds=1):%Y-%m-%d_%H-%M-%S}.png" if screenshot else None
+        (d / "logs" / f"{bot}_{when:%Y%m%d_%H%M%S}_{run_id}.log").write_bytes(
+            make_log(rng, tpl, bot, sl, when, run_id, shot_name)
+            .replace("\n", "\r\n").encode("utf-8"))          # CRLF, like the real thing
         stats["failures"] += 1
-        if screenshot:
-            write_png(d / "screenshot" / f"{bot}_{when:%Y%m%d_%H%M%S}_{run_id}.png",
-                      1280, 720, draw_dialog=dialog)
+        if shot_name:
+            write_png(d / "screenshot" / shot_name, 1280, 720, draw_dialog=dialog)
             stats["screenshots"] += 1
         return run_id
 

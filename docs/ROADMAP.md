@@ -55,6 +55,8 @@ scale — not a prototype with a pilot label.
 **In:**
 - **Scanner: tree walk, watermark, path parsing, catch-up on start**
 - **Correlator: log ↔ screenshot ↔ code pairing, with explicit refusal when ambiguous**
+- **Selection and review: folder/file pickers, a table the user can change before anything is sent,
+  and per-row overrides for screenshot, code and re-analysis**
 - Ingestion, sanitization, fingerprinting, dedup
 - Triage (Haiku 4.5) + deep text analysis (Sonnet 5)
 - **Screenshots captured, encrypted, stored, viewable in UI — Mode 0, not sent to any model**
@@ -74,7 +76,8 @@ pattern learning, any always-on service.
 | Repository foundation, CI, secret scanning | BE | 1 |
 | Data layer (SQLite), migrations, fingerprint + tests | BE | 1.5 |
 | **Scanner + watermark + catch-up** | BE | 1.5 |
-| **Correlator (log ↔ screenshot ↔ code), with ambiguity refusal** | BE | 1.5 |
+| **Correlator (log ↔ screenshot ↔ code), with ambiguity refusal** | BE | 1 |
+| **Selection, review table and overrides** | BE | 1 |
 | Sanitization + dedup | BE | 1.5 |
 | Analysis engine, `model_gateway`, prompts | BE + PO | 2.5 |
 | Notifications + HTML reports | BE | 1.5 |

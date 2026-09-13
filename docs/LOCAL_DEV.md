@@ -187,6 +187,27 @@ resp = client.messages.create(model="anthropic.claude-sonnet-5", max_tokens=4096
 All of this lives behind `model_gateway` (`ARCHITECTURE.md` §5). Nothing else imports the SDK, so the
 day this moves to the client's account — or to a VPC endpoint — one module changes.
 
+## 4a. Running it
+
+```bash
+python3 tools/make_fixtures.py --root ./sandbox
+
+# pick a folder in a dialog, review, then run
+python3 -m eagle_eyes --pick-folder \
+    --share-root ./sandbox/Network_Sharing_Folder --code-root ./sandbox/code_folder
+
+# or point straight at something and just look
+python3 -m eagle_eyes --target ./sandbox/Network_Sharing_Folder/data/FINANCE_AP/BOT201 \
+    --share-root ./sandbox/Network_Sharing_Folder --code-root ./sandbox/code_folder --dry-run
+
+# tests: no credentials, no network, no model call
+python3 tests/test_discovery.py ./sandbox
+```
+
+The dialogs need tkinter, which ships with the Windows Python installer. Without it — a headless
+Linux box, or a stripped build — the same choices appear as a numbered text browser, so nothing is
+blocked.
+
 ## 5. What local development cannot tell you
 
 Honest limits. Each of these is a real risk that the sandbox actively hides:

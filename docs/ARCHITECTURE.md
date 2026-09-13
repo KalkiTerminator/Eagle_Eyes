@@ -59,6 +59,49 @@ Two consequences to design around now, cheaply:
    to a shared folder. Only the *tool* lives on the jump server; its *output* must reach people who
    will never log into it.
 
+### Two operating modes, one code path
+
+The analyzer runs either way, and the difference is a flag rather than a build:
+
+| | **Interactive** | **Scheduled** |
+|---|---|---|
+| Started by | a developer on Exodus | Task Scheduler |
+| Scope | whatever they pick — one log, a date, a bot, a service line | a configured path |
+| Before running | a review table they can change | nothing; runs what it finds |
+| Flag | *(default)* | `--yes` |
+
+Interactive is the primary mode for the pilot. Developers already work on Exodus, already know which
+bot they are chasing, and a scheduled sweep gives them no way to say "not that one, this one."
+
+**Discovery is read-only and costs nothing**, so the review can always be shown before anything is
+sent. `--dry-run` stops there.
+
+### The user decides, the system proposes
+
+Pairing and code resolution are **proposals with their reasoning shown**, never silent decisions.
+Every one can be overridden in the review:
+
+| | |
+|---|---|
+| `3`, `3-9`, `a`, `n` | select rows, ranges, all, none |
+| `v 3` | send or withhold the screenshot for one row |
+| `s 3` | attach a different screenshot |
+| `c 3` | attach a different code file |
+| `f 3` | re-analyse even though it was analysed before |
+| `d 3` | show everything known about a row, including why the screenshot was paired |
+
+The review also states the **upper-bound cost before anything is sent** — what the run would cost if
+nothing dedups, which is the worst case. Real cost is normally far lower.
+
+Two things this exists to prevent. A developer who cannot see *why* a screenshot was attached cannot
+catch it being the wrong one, so `pairing_method` and its reasoning are in the table, not buried. And
+a tool that analyses a whole service line because someone pointed one level too high, without saying
+what that will cost, gets switched off after the first surprise.
+
+Selection is entered three ways, in order of what the machine supports: a **folder/file dialog**
+(tkinter, bundled with Windows Python), a **numbered text browser** (works over RDP with no display,
+and in CI), and **command-line arguments** for the scheduler. All three converge on the same review.
+
 ### Environment profiles
 
 Local development, Exodus and the client environment are the same code with different configuration
@@ -420,8 +463,9 @@ that stays up.
 
 ```
 eagle_eyes/
-  scan/             # tree walk, watermark, path parsing
-  correlate/        # log <-> screenshot <-> code pairing
+  discovery.py      # tree walk, path parsing, log<->screenshot<->code pairing
+  selection.py      # pickers, review table, user overrides
+  __main__.py       # CLI: --pick-folder / --pick-file / --target / --yes
   sanitize/         # log + code scrubbing
   screenshot/       # ScreenshotPolicy — modes 0-3
   fingerprint/      # normalization + hashing
