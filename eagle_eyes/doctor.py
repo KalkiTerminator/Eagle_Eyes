@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .model_gateway import sdk_status
 from .runtime import (config_search_path, data_dir, gui_possible, is_frozen,
                       is_portable, resolve_paths)
 
@@ -75,13 +76,11 @@ def run_checks(share_root: Path | None = None, code_root: Path | None = None) ->
                           "Not a blocker -- the same choices appear as a numbered "
                           "text browser. On Linux install python3-tk for dialogs."))
 
-    try:
-        import anthropic  # noqa: F401
-        out.append(_check("Model SDK", OK, f"anthropic {anthropic.__version__}"))
-    except ImportError:
-        out.append(_check("Model SDK", WARN, "anthropic not installed",
-                          "Only needed for real analysis: pip install 'anthropic[bedrock]'. "
-                          "The mock backend runs the whole pipeline without it."))
+    present, detail = sdk_status()
+    out.append(_check("Model SDK", OK if present else WARN, detail,
+                      "" if present else
+                      "Only needed for real analysis: pip install 'anthropic[bedrock]'. "
+                      "The mock backend runs the whole pipeline without it."))
 
     creds = []
     if os.environ.get("ANTHROPIC_API_KEY"):

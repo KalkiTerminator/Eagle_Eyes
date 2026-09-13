@@ -287,5 +287,19 @@ def create_backend(cfg: dict, environment: str = "local") -> Backend:
     raise BackendError(f"unknown backend '{kind}' (expected bedrock, byok or mock)")
 
 
+def sdk_status() -> tuple[bool, str]:
+    """Is a provider SDK installed, and which version.
+
+    Exists so that nothing outside this module has to import a provider SDK
+    merely to ask whether one is available -- the boundary is worth more than
+    the convenience, and tests/test_boundaries.py enforces it.
+    """
+    try:
+        import anthropic
+        return True, f"anthropic {getattr(anthropic, '__version__', 'unknown')}"
+    except ImportError:
+        return False, "anthropic not installed"
+
+
 def models_for(backend_name: str) -> dict[str, str]:
     return MODELS.get(backend_name, MODELS["mock"])
