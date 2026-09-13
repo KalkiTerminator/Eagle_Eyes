@@ -27,6 +27,8 @@ from .analysis import Engine
 from .cache import SharedCache
 from .discovery import discover, read_text
 from .model_gateway import BudgetGuard, create_backend, models_for
+from .notify import Notifier, compose
+from .report import ReportInput, write, write_index
 from .runtime import describe_host, resolve_paths
 from .storage import (AnalysisRepo, BotRepo, Database, FailureRepo,
                       FingerprintRepo, Principal, WatermarkRepo, run_retention)
@@ -65,6 +67,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="apply the retention policy and exit")
     ap.add_argument("--stats", action="store_true",
                     help="show what this database holds and exit")
+    ap.add_argument("--reports", type=Path,
+                    help="folder for HTML reports (default: the platform data directory)")
+    ap.add_argument("--no-reports", action="store_true", help="skip writing reports")
+    ap.add_argument("--notify", metavar="EMAIL",
+                    help="email the developer responsible (suppression always applies)")
+    ap.add_argument("--smtp-host", default="",
+                    help="mail relay; without it notifications are rendered, not sent")
     args = ap.parse_args(argv)
 
     principal = Principal.local()
@@ -169,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nAnalysing {len(chosen)} failures via {backend.name}"
           f"{' (no model call, no cost)' if backend.name == 'mock' else ''} ...\n")
 
+    report_dir = args.reports or resolve_paths().ensure().reports
+    notifier = Notifier(dry_run=not args.smtp_host, smtp_host=args.smtp_host)
+    written: list[tuple[ReportInput, Path]] = []
     results = []
     for i, c in enumerate(chosen, 1):
         image = None
@@ -223,6 +235,37 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"        ! not saved: {exc}")
 
+        # Report first: it is what reaches anyone who did not run this.
+        if not args.no_reports:
+            try:
+                ri = ReportInput(
+                    bot_label=c.location.label,
+                    occurred_at=(c.occurred_at or datetime.now()).isoformat(timespec="seconds"),
+                    exception_type=c.exception_type or "(unparsed)",
+                    root_cause=a.root_cause, suggested_fix=a.suggested_fix,
+                    confidence=a.confidence, path=a.path, category=a.category,
+                    notes=a.notes, inputs_used=a.inputs_used,
+                    log_path=str(c.log_path),
+                    screenshot_path=str(c.screenshot_path) if c.screenshot_path else "",
+                    pairing_method=c.pairing_method,
+                    code_path=str(c.code_path) if c.code_path else "",
+                    code_possibly_stale=c.code_possibly_stale,
+                    model_id=a.model_id,
+                    cost_usd=a.cost_usd if a.fully_priced else None)
+                rp = write(ri, report_dir,
+                           f"{c.location.bot_number}_{ri.occurred_at.replace(':', '-')}")
+                written.append((ri, rp))
+                if args.notify:
+                    notifier.send(
+                        compose(to=args.notify, bot_label=ri.bot_label,
+                                exception_type=ri.exception_type,
+                                root_cause=a.root_cause, suggested_fix=a.suggested_fix,
+                                confidence=a.confidence, fingerprint=a.fingerprint,
+                                report_path=rp),
+                        category=a.category, confidence=a.confidence)
+            except Exception as exc:
+                print(f"        ! no report: {exc}")
+
         results.append((c, a))
         cost = f"${a.cost_usd:.4f}" if a.fully_priced else "cost unknown"
         print(f"  [{i}/{len(chosen)}] {c.location.label}  {a.path:<9} "
@@ -240,6 +283,15 @@ def main(argv: list[str] | None = None) -> int:
     if cache:
         print(f"  {cache.summary()}")
     print(f"  saved to {db.path}  (--stats to review, --retention to apply the policy)")
+    if written:
+        idx = write_index(written, report_dir)
+        print(f"  {len(written)} reports in {report_dir}")
+        print(f"  index: {idx}")
+    if args.notify:
+        verb = "sent" if args.smtp_host else "rendered (no relay configured)"
+        print(f"  {len(notifier.sent_log)} notifications {verb}")
+        if notifier.suppressed:
+            print("  " + notifier.digest().replace("\n", "\n  "))
     low = sum(1 for _, a in results if a.confidence < 0.3)
     if low:
         print(f"  ! {low} returned low confidence -- treat those as leads, not answers")
