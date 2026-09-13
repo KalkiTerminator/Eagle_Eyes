@@ -1,0 +1,22 @@
+{
+  // Tests need the sandbox; the "Run all tests" task generates it first.
+  // Without it the sandbox-dependent suites SKIP rather than fail.
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "python.analysis.typeCheckingMode": "basic",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  },
+  "search.exclude": {
+    "sandbox": true
+  },
+  "[python]": {
+    "editor.rulers": [96],
+    "editor.trimAutoWhitespace": true
+  },
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}

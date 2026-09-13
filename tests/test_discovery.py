@@ -8,6 +8,7 @@ network, no model call -- CI must be able to run this on a bare checkout.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -16,25 +17,48 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.discovery import (  # noqa: E402
     LOG_TS_RE, discover, failure_time, parse_location, read_text,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-SANDBOX = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "sandbox"
+
+# The sandbox location, in order: an explicit env var, a positional argument
+# when run directly, then ./sandbox. sys.argv belongs to pytest when pytest is
+# driving, so it is only consulted for a direct run.
+_ARG = sys.argv[1] if (len(sys.argv) > 1 and not sys.argv[1].startswith("-")
+                       and "pytest" not in sys.modules) else None
+SANDBOX = Path(os.environ.get("EAGLE_EYES_SANDBOX") or _ARG or ROOT / "sandbox")
 SHARE, CODE = SANDBOX / "Network_Sharing_Folder", SANDBOX / "code_folder"
 
-_failures: list[str] = []
 
+def _need_sandbox() -> bool:
+    """Skip rather than fail when the fixtures have not been generated.
 
-def check(name: str, cond: bool, detail: str = "") -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  -- {detail}" if detail and not cond else ""))
-    if not cond:
-        _failures.append(name)
+    A suite that fails because someone has not run the generator yet teaches
+    them nothing; one that says what to run teaches them exactly one thing.
+    """
+    if SHARE.is_dir():
+        return True
+    msg = (f"sandbox not found at {SANDBOX} -- "
+           f"run: python3 tools/make_fixtures.py --root {SANDBOX}")
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip(msg, allow_module_level=False)
+    print(f"  SKIP  {msg}")
+    return False
+
+from _harness import Harness  # noqa: E402
+
+_h = Harness()
+check = _h.check
 
 
 def test_location_from_path() -> None:
+    if not _need_sandbox():
+        return
     log = next(SHARE.rglob("*.log"))
     loc = parse_location(log, SHARE)
     check("location parsed from the path, not file content", loc is not None)
@@ -45,6 +69,8 @@ def test_location_from_path() -> None:
 
 
 def test_failure_time_is_the_exception_line() -> None:
+    if not _need_sandbox():
+        return
     """Regression: occurred_at used to read the header's 'Started' time."""
     bad = 0
     for lp in list(SHARE.rglob("*.log"))[:40]:
@@ -68,6 +94,8 @@ def test_failure_time_is_the_exception_line() -> None:
 
 
 def test_pairing_uses_the_log() -> None:
+    if not _need_sandbox():
+        return
     cands = discover(SHARE, SHARE, CODE)
     check("discovery found failures", len(cands) > 100, f"{len(cands)}")
     by_log = [c for c in cands if c.pairing_method == "log_path"]
@@ -78,6 +106,8 @@ def test_pairing_uses_the_log() -> None:
 
 
 def test_basename_not_logged_path() -> None:
+    if not _need_sandbox():
+        return
     """The logged path is the VM's D: drive; only the basename is portable."""
     cands = [c for c in discover(SHARE, SHARE, CODE) if c.pairing_method == "log_path"]
     c = cands[0]
@@ -89,6 +119,8 @@ def test_basename_not_logged_path() -> None:
 
 
 def test_fallback_refuses_when_ambiguous() -> None:
+    if not _need_sandbox():
+        return
     """No capture line + two screenshots in the window = attach nothing."""
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -110,6 +142,8 @@ def test_fallback_refuses_when_ambiguous() -> None:
 
 
 def test_degradation() -> None:
+    if not _need_sandbox():
+        return
     cands = discover(SHARE, SHARE, CODE)
     check("a failure with no screenshot still yields a candidate",
           any(c.screenshot_path is None for c in cands))
@@ -121,6 +155,8 @@ def test_degradation() -> None:
 
 
 def test_crlf_does_not_leak() -> None:
+    if not _need_sandbox():
+        return
     cands = discover(SHARE, SHARE, CODE)[:60]
     check("no carriage return in the exception type",
           not any("\r" in c.exception_type for c in cands))
@@ -129,12 +165,4 @@ def test_crlf_does_not_leak() -> None:
 
 
 if __name__ == "__main__":
-    if not SHARE.is_dir():
-        print(f"Sandbox not found at {SANDBOX}.\n"
-              f"Run: python3 tools/make_fixtures.py --root {SANDBOX}")
-        sys.exit(2)
-    for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
-        print(f"\n{fn.__name__}")
-        fn()
-    print(f"\n{'All checks passed.' if not _failures else str(len(_failures)) + ' FAILED: ' + ', '.join(_failures)}")
-    sys.exit(1 if _failures else 0)
+    sys.exit(_h.run_all(globals()))

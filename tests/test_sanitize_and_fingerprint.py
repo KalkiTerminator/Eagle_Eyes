@@ -9,19 +9,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.fingerprint import (  # noqa: E402
     ALGORITHM_VERSION, compute, fingerprint, normalize, parse, top_frames, unwrap,
 )
 from eagle_eyes.sanitize import CANARY, canary_check, sanitize_code, sanitize_log  # noqa: E402
 
-_failures: list[str] = []
+from _harness import Harness  # noqa: E402
 
-
-def check(name: str, cond: bool, detail: str = "") -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  -- {detail}" if detail and not cond else ""))
-    if not cond:
-        _failures.append(name)
+_h = Harness()
+check = _h.check
 
 
 LOG = """11-09-2026 09:41:09.402 [ERROR] Activity 'Post' failed
@@ -175,8 +173,4 @@ def test_sanitize_then_fingerprint() -> None:
 
 
 if __name__ == "__main__":
-    for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
-        print(f"\n{fn.__name__}")
-        fn()
-    print(f"\n{'All checks passed.' if not _failures else str(len(_failures)) + ' FAILED: ' + ', '.join(_failures)}")
-    sys.exit(1 if _failures else 0)
+    sys.exit(_h.run_all(globals()))

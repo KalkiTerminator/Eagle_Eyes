@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Generate sandbox",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["tools/make_fixtures.py", "--root", "./sandbox"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "silent", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run all tests",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["-m", "pytest", "tests/", "-v"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "EAGLE_EYES_SANDBOX": "${workspaceFolder}/sandbox" }
+      },
+      "group": { "kind": "test", "isDefault": true },
+      "dependsOn": "Generate sandbox",
+      "problemMatcher": []
+    },
+    {
+      "label": "Check model connectivity (BYOK)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["tools/check_model.py", "--backend", "byok"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

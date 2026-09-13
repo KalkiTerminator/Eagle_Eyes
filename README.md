@@ -35,8 +35,28 @@ python3 -m eagle_eyes ... --stats      # what the database holds
 Run the tests — 312 checks, none needing a credential:
 
 ```bash
-for t in tests/*.py; do python3 "$t" ./sandbox; done
+python3 -m pytest tests/            # if you have pytest
+for t in tests/test_*.py; do python3 "$t" ./sandbox; done   # or plain Python
 ```
+
+Both work. Running a file directly prints every result then summarises, so one failure does not
+hide the next five; under pytest each check raises so the runner sees it. Suites that need the
+sandbox skip with instructions if you have not generated it.
+
+## In VS Code
+
+Open the folder and press **F5**. The `.vscode/` configs are committed:
+
+| | |
+|---|---|
+| **1. Doctor** | Is this machine ready? |
+| **2. Dry run** | What would be analysed, without sending anything |
+| **3. Analyse (mock)** | The full pipeline, no model, no cost |
+| **4. Analyse (real)** | Needs `pip install anthropic` and `ANTHROPIC_API_KEY`; capped at $0.50 |
+| **5. Stats** | What the database holds |
+
+Fixtures are generated automatically before the runs that need them. The Testing panel works too —
+`Run all tests` (Ctrl+Shift+P → *Tasks: Run Test Task*) generates the sandbox first.
 
 ## Using a real model
 

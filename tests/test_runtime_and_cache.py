@@ -10,19 +10,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.cache import CachedAnalysis, SharedCache  # noqa: E402
 from eagle_eyes.runtime import (  # noqa: E402
     config_search_path, data_dir, detect_run_mode, normalize_source, resolve_paths,
 )
 
-_failures: list[str] = []
+from _harness import Harness  # noqa: E402
 
-
-def check(name: str, cond: bool, detail: str = "") -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  -- {detail}" if detail and not cond else ""))
-    if not cond:
-        _failures.append(name)
+_h = Harness()
+check = _h.check
 
 
 def _entry(fp: str = "a" * 64, **kw) -> CachedAnalysis:
@@ -201,8 +199,4 @@ def test_corrupt_entry_is_ignored() -> None:
 
 
 if __name__ == "__main__":
-    for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
-        print(f"\n{fn.__name__}")
-        fn()
-    print(f"\n{'All checks passed.' if not _failures else str(len(_failures)) + ' FAILED: ' + ', '.join(_failures)}")
-    sys.exit(1 if _failures else 0)
+    sys.exit(_h.run_all(globals()))

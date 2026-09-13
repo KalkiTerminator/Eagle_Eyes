@@ -1,0 +1,93 @@
+{
+  // Press F5, or pick a configuration from the Run and Debug panel (Ctrl+Shift+D).
+  // Everything here runs against the synthetic sandbox: no credentials, no cost.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "1. Doctor — is this machine ready?",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eagle_eyes",
+      "args": ["--doctor"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "2. Dry run — show what would be analysed",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eagle_eyes",
+      "args": [
+        "--target", "${workspaceFolder}/sandbox/Network_Sharing_Folder/data/FINANCE_AP/BOT201",
+        "--share-root", "${workspaceFolder}/sandbox/Network_Sharing_Folder",
+        "--code-root", "${workspaceFolder}/sandbox/code_folder",
+        "--dry-run"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Generate sandbox"
+    },
+    {
+      "name": "3. Analyse (mock — no model, no cost)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eagle_eyes",
+      "args": [
+        "--target", "${workspaceFolder}/sandbox/Network_Sharing_Folder/data/FINANCE_AP/BOT201",
+        "--share-root", "${workspaceFolder}/sandbox/Network_Sharing_Folder",
+        "--code-root", "${workspaceFolder}/sandbox/code_folder",
+        "--db", "${workspaceFolder}/sandbox/eagle_eyes.db",
+        "--reports", "${workspaceFolder}/sandbox/reports",
+        "--rescan"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Generate sandbox"
+    },
+    {
+      "name": "4. Analyse (REAL model — spends money)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eagle_eyes",
+      "args": [
+        "--target", "${workspaceFolder}/sandbox/Network_Sharing_Folder/data/FINANCE_AP/BOT201",
+        "--share-root", "${workspaceFolder}/sandbox/Network_Sharing_Folder",
+        "--code-root", "${workspaceFolder}/sandbox/code_folder",
+        "--db", "${workspaceFolder}/sandbox/eagle_eyes.db",
+        "--reports", "${workspaceFolder}/sandbox/reports",
+        "--backend", "byok",
+        "--budget", "0.50",
+        "--rescan"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      // Needs `pip install anthropic` and ANTHROPIC_API_KEY in your environment.
+      // The budget is capped at 50 cents on purpose: if this run trips the cap,
+      // dedup is broken and you have found out for pocket change.
+      "preLaunchTask": "Generate sandbox"
+    },
+    {
+      "name": "5. Stats — what the database holds",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eagle_eyes",
+      "args": [
+        "--share-root", "${workspaceFolder}/sandbox/Network_Sharing_Folder",
+        "--code-root", "${workspaceFolder}/sandbox/code_folder",
+        "--db", "${workspaceFolder}/sandbox/eagle_eyes.db",
+        "--stats"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug the current test file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "EAGLE_EYES_SANDBOX": "${workspaceFolder}/sandbox" }
+    }
+  ]
+}

@@ -7,20 +7,19 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.model_gateway import (  # noqa: E402
     MODELS, BackendError, BudgetGuard, ByokBackend, MockBackend, Usage,
     _scrub, create_backend, models_for,
 )
 
-_failures: list[str] = []
+from _harness import Harness  # noqa: E402
+
+_h = Harness()
+check = _h.check
+
 FAKE_KEY = "sk-ant-api03-" + "z" * 40      # not a real key; shape only
-
-
-def check(name: str, cond: bool, detail: str = "") -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  -- {detail}" if detail and not cond else ""))
-    if not cond:
-        _failures.append(name)
 
 
 def test_backend_selection() -> None:
@@ -169,10 +168,6 @@ def test_unknown_pricing_is_not_reported_as_free() -> None:
 
 
 if __name__ == "__main__":
-    for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
-        print(f"\n{fn.__name__}")
-        fn()
-    print(f"\n{'All checks passed.' if not _failures else str(len(_failures)) + ' FAILED: ' + ', '.join(_failures)}")
-    sys.exit(1 if _failures else 0)
+    sys.exit(_h.run_all(globals()))
 
 
