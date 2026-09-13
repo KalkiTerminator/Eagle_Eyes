@@ -194,7 +194,7 @@ Honest limits. Each of these is a real risk that the sandbox actively hides:
 | Hidden here | Why it matters | Where it surfaces |
 |---|---|---|
 | **SMB latency** | Local reads are instant; reading a day of folders across many VMs may dominate runtime | First run on Exodus |
-| **Real log format** | The generator's format is invented. Fingerprint tuning against it is tuning against fiction. | The moment a real sample arrives |
+| **Real log format** | Both the generator's format and `fixtures/samples/` are invented. Fingerprint tuning against them is tuning against a guess. | The moment a real sample arrives |
 | **Real pairing convention** | Fixtures pair by filename; reality may only offer timestamps | `OPEN_QUESTIONS.md` D5 |
 | **Files being written as we read** | No partial writes locally | Under real load |
 | **Permissions and locked files** | Everything is readable here | On the real share |
@@ -227,8 +227,21 @@ In production this would have failed silently, and hardest under exactly the loa
 exists to absorb. Fixed to `(?<!\d)\d{4,}(?!\d)`; dedup across the fixtures went from 90.6% to 94.3%
 and the spike now collapses to exactly one. Written up in `DATA_MODEL.md` §2.3.
 
-A second, smaller finding: bot numbers were not unique across service lines, so `<bot>.txt` silently
+Three more came from `fixtures/samples/`, hand-written to carry the mess real Windows logs carry --
+CRLF, .NET inner-exception chains, retries logged as WARN, interleaved threads:
+
+- **The fingerprint used the outer exception type.** iBot wraps retried activities, so a COM hang and
+  a locked file both report `iBot.Core.ActivityException`. Most UI and file activities sit inside a
+  retry scope, so this would have flattened a large share of failures into one bucket. Fixed by
+  unwrapping the chain (`DATA_MODEL.md` 2.2a).
+- **The `0x...` rule destroyed HRESULTs**, merging distinct COM faults that need different fixes.
+- **CRLF rode into the hash**, so one failure fingerprinted differently across platforms.
+
+None were visible against the generated fixtures, which were too tidy. **Realistic mess is where
+parser bugs live** -- the argument for hand-writing some samples rather than only generating them.
+
+A further, smaller finding: bot numbers were not unique across service lines, so `<bot>.txt` silently
 overwrote code files. Whether real bot numbers are globally unique is now `OPEN_QUESTIONS.md` D7 —
 if they are not, the code folder must be keyed by `(service_line, bot_number)`.
 
-Build the fixtures before the pipeline, not after.
+Build the fixtures before the pipeline, not after -- and make some of them by hand, ugly on purpose.
