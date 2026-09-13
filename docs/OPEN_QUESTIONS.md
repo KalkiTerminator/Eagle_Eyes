@@ -37,12 +37,14 @@ what you inherited.
 |---|---|---|---|
 | 🔴 B1 | Is an AWS account available with Bedrock enabled in the target region? | Yes | Cloud/IT |
 | 🔴 B2 | Which SSO provider, and who owns the groups driving authorization? | Entra ID, team-mapped groups | IT/Identity |
-| 🔴 B3 | **Can bot VMs reach an AWS endpoint over outbound HTTPS?** Proxy? TLS inspection? | Yes, via corporate proxy — **unverified, and if no there is no ingestion path** | Network / IT |
-| 🔴 B4 | **May we deploy the emitter to production bot VMs?** What review does estate-wide software need? | Yes with change control | Security + IT |
-| 🔴 B5 | **Is an approved agent already on these VMs** (CloudWatch, Fluent Bit, Splunk, SCCM) we could extend? | No — **checking this first could remove the largest piece of Phase 1 risk** | DevOps / IT |
-| 🟡 B5a | How is software deployed and updated on bot VMs? Change-control lead time? | SCCM-style push, weeks per release | IT / RPA ops |
-| 🟡 B5b | What CPU/memory headroom exists on a bot VM? | Enough for a small agent — **must be confirmed; the emitter shares a VM with production work** | RPA ops |
-| 🟡 B3a | Where does iBot bot source live — version control, central store, or only on the VM? | In git — if actually on-VM, code ships in the envelope instead | iBot team |
+| 🔴 B3 | **Can Exodus reach Bedrock over outbound HTTPS?** Direct, proxy, or allowlist? | Assumed yes — **unverified, and if no the analyzer cannot call a model at all. One command settles it.** | Network / IT |
+| 🔴 B4 | **May we install an application on Exodus?** What review does that need? | Yes — but a jump server is a control point into production and may be scrutinised harder than an ordinary host | Security + IT |
+| 🔴 B5 | **Can IT create a read-only service account** with access to the VM shares and the code folder? | Yes — **must be share-scoped, never `C$`/`ADMIN$`, never write** | IT / Identity |
+| 🟡 B5a | Does the analyzer run under that service account on a schedule, or only in an interactive session? | Interactive — the catch-up scan covers both, so this changes the trigger, not the design | IT |
+| 🟡 B5b | Does Exodus have disk encryption? The SQLite database depends on it. | Yes | IT |
+| 🟡 B5c | Does the SMTP relay accept mail from Exodus without a new rule? | Yes | IT |
+| 🟡 B5d | Which shared folder hosts the HTML reports, and who can read it? | A team share — **the one new place client-derived content lands; needs its own ACL review** | IT + Security |
+| 🟡 B3a | Is the shared code folder backed up or version-controlled in any way? | No — manual `.txt` copies only | RPA ops |
 | 🟡 B6 | Mail relay — SES, or an internal relay? Approval needed? | SES with verified domain | IT |
 | 🟡 B7 | Teams or Slack? Can we register an app/webhook? | Teams, Phase 3 | IT |
 | 🟡 B8 | Is there an existing SIEM that must receive audit events? | No — audit in Postgres | Security ops |
@@ -79,15 +81,21 @@ what you inherited.
 biggest practical change from the platform decision: most of these are answerable, and several are
 *changeable*.
 
-| 🔴 D1 | What is iBot's log format, path convention, and rotation policy? | Text files in a per-run directory | iBot team |
-| 🔴 D5 | **How are a log and its screenshot correlated on disk** — shared run ID, filename convention, or timestamp proximity? | Shared run ID — **timestamp proximity would be fragile and would argue hard for Option A** | iBot team |
+The share layout is known:
+`Network_Sharing_Folder/data/{service line}/{bot number}/{year}/{month}/{date}/logs/user logs/{logs,screenshot}`
+— which gives service line, bot number and date structurally, with no content parsing. What remains
+is what happens *inside* a date folder.
+
+| 🔴 D5 | **How are a log and its screenshot paired inside one date folder** — shared run ID in the filename, a reference in the log body, or timestamp proximity only? | Shared run ID — **if it is timestamp proximity, concurrent failures on one bot will mismatch and we must refuse to attach rather than guess (`ARCHITECTURE.md` §4.4)** | iBot team |
+| 🔴 D7 | **How does `bot_number` map to a file in the code folder?** Exact name, prefix, per-service-line subfolder? | `{bot_number}.txt` — needs confirming | PO / RPA ops |
+| 🟡 D1 | What is iBot's log format and rotation policy? | Text, one file per run | iBot team |
 | 🟡 D2 | Screenshot format and resolution as written today? | PNG, full desktop resolution | iBot team |
-| 🟡 D3 | **Will iBot capture only the failing window instead of the full desktop?** | Not today — **an ask, not a constraint; best security win available (`SECURITY.md` §3.1 C′)** | iBot team |
-| 🟡 D3a | **Will iBot emit structured error metadata (exception, stack, activity, code location) as a JSON sidecar?** | Not today — **removes the fingerprint's biggest fragility (`DATA_MODEL.md` §2.0)** | iBot team |
-| 🟡 D3b | Will iBot POST the failure event itself (Option A)? On what timeline? | Not today; Option B bridges | iBot team |
+| 🟡 D3 | **Will iBot capture only the failing window instead of the full desktop?** | Not today — an ask, not a constraint. Under Mode 0 this is now an efficiency and Modes 1–2 question, no longer a blocker. | iBot team |
+| 🟡 D3a | **Will iBot emit structured error metadata as a JSON sidecar?** | Not today — **removes the fingerprint's biggest fragility (`DATA_MODEL.md` §2.0)** | iBot team |
 | 🟡 D4 | Does the log carry a stack trace and code location, or must we infer it? | Yes, includes activity and location | iBot team |
-| 🟡 D6 | How long do logs and screenshots survive on the VM before rotation deletes them? | ≥24h — **sets how long the emitter's spool has to recover from an outage** | iBot team / RPA ops |
-| 🟡 D6a | Does iBot ever capture windows outside the bot's own session? | No | iBot team |
+| 🟡 D6 | How long do logs and screenshots survive on the share before rotation deletes them? | ≥30 days — **sets how far back a catch-up scan can recover, and whether a report's screenshot link still resolves** | RPA ops |
+| 🟡 D8 | **Who keeps the code folder current, and how stale does it get?** | Kept current — **`ARCHITECTURE.md` §4.5 flags staleness rather than trusting this** | PO / RPA ops |
+| ⚪ D9 | Is the tree structure stable, or does it vary by service line? | Stable — the path template is configurable in case it is not | RPA ops |
 | ⚪ D7 | Are there bots whose screens are categorically too sensitive to capture at all? | Assumed none — **likely false; some client screens may need a blocklist** | PO + Security |
 | ⚪ D8 | Volume — what is the *actual* current failure rate per day? | 100–2,000 range assumed | RPA ops |
 | ⚪ D9 | Do failures cluster per bot within minutes? (Decides whether prompt caching pays — `COST_MODEL.md` §4.2) | Unknown; projections assume no benefit | Measure in Phase 1 |
@@ -107,30 +115,33 @@ Things I decided because there was no one to ask. Each is a place the design cou
 3. **Fingerprint's 4-digit integer threshold** (`DATA_MODEL.md` §2.3). A guess. Needs tuning on
    real logs; too loose merges distinct failures, too strict collapses the hit rate.
 4. **30-day analysis reuse TTL.** Arbitrary. Balances freshness against hit rate.
-5. **Code re-fetched at analysis time rather than snapshotted at ingest.** Simpler; assumes the
-   repo is reachable and the commit still exists.
+5. **Code read from the shared folder at analysis time.** The only option — there is no repo and no
+   per-run snapshot. Carries the staleness risk in item 14.
 6. **Vision escalation defaults to text-only when uncertain.** Conservative; cheap because the
    vision premium is only 6% (`COST_MODEL.md` §7).
 7. **Platform admins cannot view screenshots.** A deliberate stance that will be argued about.
-8. **Standard SQS, not FIFO.** Analysis writes are idempotent on `(fingerprint, commit_sha)`.
-9. **Single Postgres instance, no read replica.** Volumes are small; add one if the dashboard
-   proves heavy.
+8. **Re-scans are idempotent on `log_path`.** A re-run over the same folder writes nothing new.
+9. **SQLite is sufficient for Phase 1.** One host, one writer. Phase 3 ports to Postgres
+   (`DATA_MODEL.md` §8).
 10. **No multi-tenancy beyond team-level authorization.** Assumes one client engagement. If this
     serves multiple clients, the data model needs a tenant boundary and **that is a rewrite, not
     an addition** — ask before Phase 1 if there is any chance of it.
-
-13. **The emitter can run on a bot VM without disturbing the bot.** Assumes spare CPU, memory and
-    disk, and that security accepts new estate-wide software. Unverified on both counts (B4, B5b).
-14. **A 500 MB spool is enough to ride out an outage.** A guess. Depends on failure volume per VM
-    and outage length; tune once real rates are known.
-15. **Log and screenshot can be correlated on disk without iBot's help.** If correlation is only by
-    timestamp proximity, the sidecar will mismatch them under load and Option A becomes mandatory
-    rather than preferred (D5).
-16. **iBot's log format is stable across versions.** If it drifts between releases, the fingerprint's
-    normalization breaks silently — exactly the failure `DATA_MODEL.md` §2.5 versioning is for.
-11. **English-language logs and screenshots.** OCR and PII detection are language-sensitive. If
-    client applications are non-English, redaction quality drops sharply.
+11. **English-language logs and screenshots.** OCR and PII detection are language-sensitive.
 12. **Screenshots are PNG at desktop resolution.** Drives the downscale and token math.
+13. **Exodus can reach Bedrock.** The whole design rests on it and it is unverified (B3).
+14. **The code folder's `.txt` files are current enough to reason about.** Manually maintained, with
+    no version control and no record of which version a bot was running. Mitigated by an mtime
+    staleness flag, not solved (`ARCHITECTURE.md` §4.5).
+15. **Log and screenshot can be paired inside a date folder.** If it is timestamp proximity only,
+    concurrent failures mismatch and we attach nothing rather than guess (D5).
+16. **iBot's log format is stable across versions.** If it drifts, the fingerprint's normalization
+    breaks silently — exactly what `DATA_MODEL.md` §2.5 versioning exists for.
+17. **SMB reads from Exodus are fast enough** to walk a day's folders for all pilot bots in a
+    reasonable run. Unmeasured; latency over SMB to many VMs could dominate runtime.
+18. **A file that stops changing is complete.** The scanner may otherwise read a log mid-write.
+    Mitigated by requiring a stable mtime for N seconds before processing.
+19. **Overnight and weekend gaps are acceptable in Phase 1.** The analyzer only runs when Exodus is
+    open. Fine for a pilot; a real limitation at 150 developers (Phase 3 addresses it).
 
 ---
 
@@ -138,24 +149,27 @@ Things I decided because there was no one to ask. Each is a place the design cou
 
 If bandwidth allows only a handful:
 
-1. **B3** — can a bot VM reach an AWS endpoint over HTTPS? *New top of the list. iBot writes only
-   to local disk, so this is the entire ingestion path. If it is no, nothing else in the plan
-   matters. Prove it with one VM and one curl — an afternoon, not a workstream.*
-2. **A4** — do Bedrock's terms satisfy the client contract? *Blocks everything downstream of
-   ingestion. Must be read, not recalled.*
-3. **A3** — are unscrubbed names in logs acceptable? *Blocks Phase 1; unlike the screenshot
-   questions, Mode 0 does not route around it.*
-4. **C3** — what is the MTTR baseline, and has anyone measured it? *Cannot be captured
-   retroactively. Miss this window and the pilot cannot demonstrate value no matter how well it
-   works.*
-5. **B4 / B5** — may we deploy the emitter, and is there already an agent we could extend instead?
-   *Decides whether Phase 1's largest workstream exists at all.*
+Two of these are an afternoon each, and both are blocking. Do them first.
 
-**And start the iBot conversation this week even though it is not on this list** (D3, D3a, D3b).
-Those are asks to a colleague rather than blockers, but they need lead time, and two of them —
-capture narrowing and structured error metadata — are the best available improvements to the
-security posture and to dedup reliability respectively. They were not even askable when the plan
-assumed a vendor tool.
+1. **B3** — can Exodus reach Bedrock over HTTPS? *One command from the jump server. If the answer is
+   no, the analyzer cannot call a model and nothing else in the plan matters.*
+2. **D5** — how are a log and its screenshot paired inside a date folder? *One directory listing
+   settles it. If it is timestamp proximity only, screenshots become unreliable for concurrent
+   failures and the correlator has to refuse rather than guess — a design consequence, not a detail.*
+3. **A4** — do Bedrock's terms satisfy the client contract? *Must be read, not recalled.*
+4. **A3** — are unscrubbed names in logs acceptable? *Blocks Phase 1. Mode 0 routes around the
+   screenshot questions but not this one.*
+5. **C3** — what is the MTTR baseline, and has anyone measured it? *Cannot be captured
+   retroactively.*
+
+**Start the iBot conversation this week even though it is no longer blocking** (D3, D3a). Structured
+error metadata would remove the fingerprint's largest fragility, and capture narrowing is still the
+best upstream improvement available — but neither gates Phase 1 now, because Mode 0 copies nothing
+and sends nothing.
+
+**What dropped off this list is worth noting.** Two drafts ago the top questions were about
+screenshot permission and estate-wide agent deployment. Reading existing shares from one host
+removed both: there is no agent, and in Mode 0 there is no copy to get permission for.
 
 **C3 remains the one most likely to be skipped and most expensive to skip.** It is the only question
 here with a deadline set by the physics of measurement: once the system is live, the before-state is

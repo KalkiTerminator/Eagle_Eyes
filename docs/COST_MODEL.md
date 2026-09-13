@@ -238,50 +238,46 @@ Funnel per 100 failures ingested: 70 dedup hits ($0) → 30 triaged → 4.5 nois
 | 500 | $19.13 | $72.58 | $33.01 | **$125** |
 | 2,000 | $76.50 | $290.30 | $132.04 | **$499** |
 
-### AWS infrastructure, per month
+### Infrastructure, per month
+
+Almost nothing, because there is almost no infrastructure. The analyzer runs on Exodus, a server
+that already exists and is already paid for; storage is a SQLite file on its disk; the only external
+call is to Bedrock.
 
 | Component | Cost |
 |---|---:|
-| ECS Fargate — API (2 tasks) | ~$30 |
-| ECS Fargate — workers (avg 2) | ~$30 |
-| ECS Fargate — notifier + policy worker | ~$25 |
-| RDS PostgreSQL, Multi-AZ (db.t4g.medium) | ~$130 |
-| Application Load Balancer | ~$20 |
-| S3 (≤150 GB) + requests | ~$5 |
-| CloudFront + S3 static UI | ~$5 |
-| SQS, KMS, Secrets Manager | ~$8 |
-| CloudWatch logs, metrics, alarms | ~$30 |
-| **Total** | **~$283** |
+| Exodus jump server | **$0 — already exists** |
+| SQLite storage (a few GB/year on existing disk) | ~$0 |
+| Internal SMTP relay | $0 — existing |
+| Reports on an existing share | ~$0 |
+| Bedrock data transfer | negligible |
+| **Total** | **≈ $0** |
 
-The emitter adds no AWS cost — it runs on bot VMs that already exist. Its cost is **operational, not
-financial**: packaging, signing, estate-wide deployment, and change control on every release. Budget
-that as engineering time in `ROADMAP.md`, not as infrastructure spend. It is the main reason Option A
-(iBot emits natively) is worth pursuing even though Option B is cheaper to start.
+The previous design projected ~$283/month for ECS, RDS Multi-AZ, an ALB, S3 and CloudWatch. **All of
+it is gone.** Reading shares from one host that already exists removed the entire AWS footprint
+except the model calls themselves.
 
 ### Combined
 
 | Failures/day | Model | Infra | **Total** | Per developer (150) |
 |---:|---:|---:|---:|---:|
-| 100 | $25 | $283 | **$308** | $2.05 |
-| 500 | $125 | $283 | **$408** | $2.72 |
-| 2,000 | $499 | $283 | **$782** | $5.21 |
+| 100 | $25 | ≈$0 | **~$25** | $0.17 |
+| 500 | $125 | ≈$0 | **~$125** | $0.83 |
+| 2,000 | $499 | ≈$0 | **~$499** | $3.33 |
 
-**At 100 failures/day, infrastructure costs 11× the models. Even at 2,000/day it is nearly half.**
+**The whole system now costs less than $500/month at the top of the projected range**, and model
+spend is 100% of it.
 
-The honest conclusion: **model spend is not this system's cost problem.** At the top of the
-projected range the entire bill is under $800/month against 150 developers — roughly the loaded
-cost of one developer-day. The dominant cost of this project is engineering time, and the second is
-AWS baseline.
+That changes one conclusion from the earlier draft and reinforces another:
 
-Two consequences worth acting on:
+- **Changed:** infrastructure is no longer the dominant cost — it is zero. Dedup and routing now
+  govern the entire bill, so the cost controls in §9 matter more than they did.
+- **Reinforced, harder than before:** do not trade accuracy for model cost. The entire annual spend
+  at 2,000 failures/day is about $6,000 — comfortably under the loaded cost of a single developer
+  for a month. One developer-hour lost to a confidently wrong diagnosis is worth more than a week of
+  vision calls.
 
-- The budget guard is **runaway protection**, not a cost-management necessity. Its job is to catch
-  a fingerprint regression or a retry loop, not to ration normal operation.
-- **Do not trade accuracy for model cost.** At these absolute numbers, a cheaper model that is
-  wrong more often is a bad trade by orders of magnitude. One developer-hour lost to a wrong
-  diagnosis costs more than a month of vision calls.
-
----
+The real cost of this project is engineering time. It always was; now it is not even close.
 
 ## 9. Cost controls
 
@@ -300,6 +296,12 @@ Checked **before** every model call, never after.
 The per-bot hourly limit exists because the realistic runaway is one misbehaving bot, not
 estate-wide growth.
 
+One risk specific to this design: **a catch-up scan after a long gap.** If Exodus is unopened over a
+weekend or a holiday, the next run finds a large backlog and processes it in one burst. Dedup should
+absorb most of it, but the daily cap must be a cap on the *run*, not on wall-clock time, or a Monday
+morning catch-up will trip it and stall legitimate work. Size the cap against the largest plausible
+backlog, not the average day.
+
 ### Alerting
 
 | Signal | Threshold | Why it matters |
@@ -314,15 +316,19 @@ estate-wide growth.
 
 In order, cheapest concession first:
 
-1. **RDS single-AZ** (−$65/mo). At 100/day this alone is a quarter of the bill. Costs failover.
-2. **Raise `ANALYSIS_REUSE_TTL` from 30 to 90 days.** Lifts hit rate by an estimated 5–10 points
-   for one config change. Costs freshness on slowly-drifting failures.
-3. **Disable the vision path entirely.** Saves ~6% of deep-analysis cost — a rounding error. Listed
-   here only to make the point: cutting vision to save money is not worth the capability loss.
-4. **Reduce CloudWatch retention** (−$15/mo).
+1. **Raise `ANALYSIS_REUSE_TTL` from 30 to 90 days.** One config change; lifts hit rate by an
+   estimated 5–10 points. Costs freshness on slowly-drifting failures. Free otherwise.
+2. **Promote recurring fingerprints to templates aggressively.** A template response costs nothing.
+   Every fingerprint with consistent `correct` feedback that becomes a pattern is a permanent saving.
+3. **Trim the log excerpt and code sent for deep analysis.** Input is 14,200 tokens, and most of it
+   is code. Sending the failing function plus its callers rather than the whole file could cut
+   deep-analysis cost by a third — and may well improve the diagnosis by removing noise.
+4. **Disable the vision path entirely.** Saves ~6% of deep-analysis cost — a rounding error. Listed
+   only to make the point: cutting vision to save money is not worth the capability loss.
 5. **Route deep analysis to Haiku 4.5** (−~60% of model spend). **Last resort, and probably never.**
-   At these absolute figures the accuracy risk is not worth ~$300/month.
+   At these figures the accuracy risk is not worth ~$300/month.
 
-Note what this ordering says: **the first two items halve the bill at low volume without touching
-model quality at all.** If someone asks us to cut cost, the answer is infrastructure and TTL
-tuning, not capability.
+The ordering changed with the infrastructure. Previously the first two items were AWS line items
+that halved the bill without touching quality. There are no AWS line items now, so every lever acts
+on the model path — and the first three are still free. **If asked to cut cost, tune reuse, templates
+and prompt size. Do not cut capability; there is not enough money in it to matter.**

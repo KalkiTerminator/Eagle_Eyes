@@ -14,10 +14,13 @@ reviewer (part-time), **PO** you.
 |---|---|---|
 | Take `SECURITY.md` §9 to EXL security; get Q1, Q2, Q5, Q8 answered | PO | — |
 | Confirm Bedrock data-handling terms against the client contract, in writing | PO + Sec | — |
-| **Confirm bot VMs can reach an AWS endpoint over outbound HTTPS** — proxy, TLS inspection, firewall | DevOps + Network | 0.5 |
-| **Check for an existing approved agent on bot VMs** (CloudWatch, Fluent Bit, Splunk, SCCM) to extend instead of deploying ours | DevOps + IT | 0.5 |
-| **Open the iBot conversation:** capture narrowing, structured error metadata, native event POST | PO + iBot team | — |
-| Get iBot's log format, screenshot naming, and log↔screenshot correlation convention documented | PO + iBot team | — |
+| **Confirm Exodus can reach Bedrock over outbound HTTPS** — one command from the jump server | DevOps + Network | 0.1 |
+| **Get one real directory listing** from a VM share date folder + one sanitized sample log | PO | 0.1 |
+| **Confirm the log↔screenshot pairing convention** from that sample (run ID? filename? timestamp only?) | PO + iBot team | — |
+| Confirm the code folder's naming convention and how `bot_number` maps to a file | PO | — |
+| Service account with read-only access to the VM shares and code folder | IT / Identity | 0.5 |
+| Approval to install an application on Exodus | Security + IT | — |
+| **Open the iBot conversation:** capture narrowing, structured error metadata | PO + iBot team | — |
 | AWS account, VPC, Bedrock model access enabled in-region | DevOps | 0.5 |
 | Confirm SSO provider and the group structure driving authorization | PO + IT | — |
 | Identify 5–8 pilot bots and 5–8 pilot developers | PO | — |
@@ -27,13 +30,13 @@ reviewer (part-time), **PO** you.
 
 **Dependencies:** EXL security, client contract owner, IT/cloud/network, iBot team, RPA ops.
 
-**Exit:** Q1/Q2/Q5/Q8/Q18 answered; pilot bots named; AWS account with Bedrock access; baseline
-captured; **a confirmed network path from a bot VM to our endpoint**; iBot asks logged on their
-backlog with an owner.
+**Exit:** Q17 (Exodus → Bedrock egress) confirmed; Q5 and Q8 answered; pilot bots named; a real
+directory listing in hand so pairing is settled; service account created; baseline captured.
 
-> **The network path is the new hard blocker.** iBot writes only to local disk, so if bot VMs cannot
-> reach our ingestion endpoint there is no ingestion path and no amount of design works around it.
-> Prove it with one VM and one curl in week one, before anything else is built.
+> **Two of these are an afternoon each and both are blocking.** One command from Exodus settles
+> whether the analyzer can call a model at all. One directory listing settles whether screenshots
+> can be attached to the right failure. Neither needs a meeting, and everything downstream assumes
+> both. Do them first.
 
 > **Phase 0 does not block Phase 1.** Mode 0 (`SECURITY.md` §3.3) is safe with every screenshot
 > question still open — that is what it is for. Start Phase 1 in parallel; only Phase 3 truly
@@ -49,43 +52,47 @@ scale — not a prototype with a pilot label.
 ### Scope
 
 **In:**
-- **Emitter (Option B sidecar): spool, backoff, resource ceiling, packaging, deployment** — the
-  largest new piece of work and the one with the least precedent
+- **Scanner: tree walk, watermark, path parsing, catch-up on start**
+- **Correlator: log ↔ screenshot ↔ code pairing, with explicit refusal when ambiguous**
 - Ingestion, sanitization, fingerprinting, dedup
 - Triage (Haiku 4.5) + deep text analysis (Sonnet 5)
 - **Screenshots captured, encrypted, stored, viewable in UI — Mode 0, not sent to any model**
-- Postgres, S3, SQS, ECS on AWS
-- Service API with SSO and data-layer authorization
-- Email notification with suppression
-- Failure feed + analysis detail UI, with feedback controls
+- SQLite storage on Exodus
+- Email notification with suppression, via the internal relay
+- HTML report per failure, written to a shared folder
 - Audit logging, retention job
 - Structured logging, metrics, budget guard
 
-**Out:** vision analysis, Teams integration, operations dashboard, digest mode, automated pattern
-learning, Option A (iBot-native emission — tracked in parallel, not depended on).
+**Out:** vision analysis, Teams integration, web UI, operations dashboard, digest mode, automated
+pattern learning, any always-on service.
 
 ### Effort
 
 | Workstream | Roles | Weeks |
 |---|---|---|
-| Repository foundation, CI, secret scanning | BE + DevOps | 1 |
-| Data layer, migrations, fingerprint + tests | BE | 2 |
-| Ingestion API, sanitization, dedup | BE | 2 |
-| **Emitter: spool, retry, packaging, deployment, soak test on a real bot VM** | BE + DevOps | **3** |
+| Repository foundation, CI, secret scanning | BE | 1 |
+| Data layer (SQLite), migrations, fingerprint + tests | BE | 1.5 |
+| **Scanner + watermark + catch-up** | BE | 1.5 |
+| **Correlator (log ↔ screenshot ↔ code), with ambiguity refusal** | BE | 1.5 |
+| Sanitization + dedup | BE | 1.5 |
 | Analysis engine, `model_gateway`, prompts | BE + PO | 2.5 |
-| API, SSO, authorization, audit | BE | 2 |
-| Notifications with suppression | BE | 1 |
-| UI — two views | FE | 2.5 |
-| AWS infrastructure as code, deployment | DevOps | 2 |
+| Notifications + HTML reports | BE | 1.5 |
+| Audit, retention, budget guard | BE | 1 |
+| Packaging + install on Exodus, scheduling | BE + DevOps | 1 |
 | Security review + hardening | Sec + BE | 1.5 |
 | Pilot onboarding, runbook, docs | PO + BE | 1 |
 
-**Total ~20 person-weeks.** With 2 BE + 1 FE + 0.5 DevOps + 0.25 Sec: **8–10 calendar weeks.**
+**Total ~15.5 person-weeks.** With 2 BE + 0.25 DevOps + 0.25 Sec: **6–8 calendar weeks.** No
+frontend needed in Phase 1.
 
-Two weeks more than the multi-platform draft, and the shape of the risk has moved. Dropping to one
-platform saved adapter work; pushing from VMs cost more than that back. The emitter is the riskiest
-item in Phase 1 — it runs on production machines we do not own, its failure modes are remote and
-quiet, and every release goes through change control.
+Down from ~20 in the previous draft. Reading existing shares from one host deleted the emitter
+fleet, the ingestion API, the AWS infrastructure work, SSO, and the web UI — replacing all of it with
+a scanner and a correlator.
+
+**The riskiest item is now the correlator**, not deployment. If log↔screenshot pairing turns out to
+rest on timestamp proximity, the screenshot input is unreliable for concurrent failures and we will
+be refusing to attach images more often than we would like. That is a correctness problem, and it is
+why the directory listing is a Phase 0 exit condition rather than a Phase 1 discovery.
 
 This is "weeks, not months" only with that team. With one engineer it is four to five months, and
 the pilot should be cut harder rather than run that long — drop notifications and the UI feed, and
@@ -93,8 +100,9 @@ deliver analyses by email alone.
 
 ### Unlocks
 
-Real accuracy data. Real dedup hit rate against real logs. Real cost against §8 projections. A
-working system to point at while the screenshot question resolves.
+Real accuracy data. Real dedup hit rate against real logs. Real cost against projections. A working
+system to point at while the screenshot question resolves — and, because Mode 0 copies nothing, one
+that needs no screenshot sign-off to run at all.
 
 ---
 
@@ -130,7 +138,12 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 
 ## Phase 3 — Scale to the estate
 
-**Goal:** 150 developers, all pilot-validated bot categories.
+**Goal:** 150 developers, all pilot-validated bot categories — and getting off the jump server.
+
+The Exodus deployment is deliberately a Phase 1 shortcut. It is bound to an interactive session, so
+overnight failures wait for someone to log in, and it does not serve a web UI to anyone who is not on
+the jump server. Phase 3 moves the same code to a host that stays up. The catch-up scan built in
+Phase 1 (`ARCHITECTURE.md` §4.3) is what makes that a change of trigger rather than a rewrite.
 
 ### Scope
 
@@ -143,8 +156,8 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 
 | Workstream | Roles | Weeks |
 |---|---|---|
-| **Emitter rollout to the full estate** (staged rings, monitoring, rollback) | DevOps + BE | 2 |
-| **Migrate to Option A** if iBot ships native emission | BE + iBot team | 1 |
+| **Move off Exodus to an always-on host; port SQLite → Postgres** | BE + DevOps | 3 |
+| **Web UI + SSO** (needs a host that stays up) | FE + BE | 3 |
 | Chat integration | BE | 1 |
 | Operations dashboard | FE + BE | 2.5 |
 | Digest + rate caps | BE | 1 |
@@ -152,7 +165,7 @@ is a legitimate outcome, not a failure — and it is why Phase 1 does not depend
 | Load testing and scaling | DevOps + BE | 1.5 |
 | Onboarding at scale | PO | 1 |
 
-**Total ~11–14 person-weeks → 5–7 calendar weeks.**
+**Total ~13–16 person-weeks → 6–8 calendar weeks.**
 
 **Gate:** do not enter Phase 3 without Phase 1 evidence (§ *Go/no-go* below). Rolling a system
 developers do not trust out to 150 people converts a small problem into an organization-wide one.
@@ -180,12 +193,15 @@ Phase 1 with nothing consuming it is deliberate — the data has to exist before
 
 | Dependency | Needed by | Owner | Risk if late |
 |---|---|---|---|
-| **Network path: bot VM → AWS endpoint** | **Phase 1** | Network / IT | **No ingestion path at all. Hard blocker — prove it in week one.** |
-| **Approval to deploy the emitter estate-wide** | **Phase 1** | Security + IT | Forces dependence on iBot's release cycle for Option A |
-| **iBot: log format + correlation convention** | Phase 1 | iBot team (internal) | Emitter cannot correlate log to screenshot reliably |
+| **Exodus → Bedrock outbound HTTPS** | **Phase 1** | Network / IT | **No model call possible. Hard blocker — one command settles it.** |
+| **Read-only service account for VM shares + code folder** | **Phase 1** | IT / Identity | Analyzer cannot read anything |
+| **Approval to install on Exodus** | **Phase 1** | Security + IT | No deployment target |
+| **Log↔screenshot pairing convention** | **Phase 1** | iBot team (internal) | Screenshots attach to the wrong failure, or must be dropped |
+| Code folder naming convention | Phase 1 | PO / RPA ops | Code input unavailable; log-only analysis |
+| SMTP relay accepts mail from Exodus | Phase 1 | IT | Reports only, no notifications |
+| Shared folder for HTML reports, with ACLs | Phase 1 | IT | Developers need Exodus to see results — defeats the purpose |
 | iBot: structured error metadata | Phase 1 quality | iBot team (internal) | Fingerprint stays regex-based and fragile |
-| iBot: capture narrowing (Option C′) | Phase 2 | iBot team (internal) | Falls back to server-side crop — weaker, still workable |
-| Software deployment mechanism to bot VMs | Phase 1 | IT / RPA ops | Every emitter release becomes slow and manual |
+| iBot: capture narrowing | Phase 2 | iBot team (internal) | Falls back to reading full screenshots for Modes 1–2 |
 | Security answers Q1, Q2 | Phase 2 | EXL Security | Phase 2 slips; Phase 1 unaffected |
 | Security answers Q5, Q8 | **Phase 1** | EXL Security + contract | **Blocks Phase 1** |
 | Client-specific PII formats (Q6) | Phase 1 | Client / engagement lead | Scrubber ships incomplete |
@@ -197,10 +213,13 @@ Phase 1 with nothing consuming it is deliberate — the data has to exist before
 | Client notification (Q11) | Pilot go-live | Contract owner | Legal exposure |
 | Penetration test (Q15) | Phase 3 | Security | Blocks estate rollout |
 
-**The dependency profile changed with iBot.** Previously the critical path ran through EXL Security.
-It now runs through **IT and Network** — the path from a bot VM to our endpoint, and permission to
-put software on production VMs. Neither is a design question and neither can be worked around;
-both should be settled in week one.
+**The critical path runs through IT, not Security.** Every blocker above is an access or permission
+question: egress from Exodus, a service account, permission to install, a share for reports. None is
+a design question, and none can be worked around.
+
+The compensating gain is large: because Mode 0 copies no screenshots and stores nothing outside the
+estate, **the screenshot sign-off no longer gates Phase 1 at all.** The security conversation that
+looked like the critical path two drafts ago now gates only the vision capability in Phase 2.
 
 The compensating gain: several things that would have been vendor constraints are now internal
 roadmap items with a colleague's name on them (`ARCHITECTURE.md` §3). Push on them early — the
@@ -224,8 +243,8 @@ P3                                      [============]
 P4                                                  [==========]
 ```
 
-Assumes the team above and that Q5/Q8 answer inside three weeks. **The dominant schedule risks are
-now network/IT approval and emitter rollout, with security response close behind.** Phase 0 starting on day one is the highest-leverage
+Assumes the team above. **The dominant schedule risk is IT turnaround on access — egress, service
+account, install approval — not engineering and no longer security.** Phase 0 starting on day one is the highest-leverage
 thing available.
 
 ---

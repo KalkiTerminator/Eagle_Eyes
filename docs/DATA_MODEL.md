@@ -25,13 +25,14 @@ erDiagram
 | `team` | Authorization boundary. Owns bots. |
 | `developer` | SSO identity. Team member. Receives notifications. |
 | `bot` | An automation. Has a responsible developer and a code location. |
-| `failure` | One occurrence. The high-volume table. |
+| `failure` | One occurrence, with the paths every input came from. The high-volume table. |
 | `fingerprint` | Dedup key. One row per distinct normalized failure signature. |
 | `analysis` | A model-produced (or template) diagnosis, attached to a fingerprint. |
-| `screenshot` | Image metadata + S3 pointer. Never image bytes in the database. |
+| `screenshot` | Image metadata + UNC path. Never image bytes, and in Mode 0 never a copy either. |
 | `pattern` | A known failure type with a canned response. No model call. |
 | `feedback` | Developer verdict on an analysis. Ground truth. |
 | `audit_event` | Append-only access record. |
+| `scan_watermark` | Which files the scanner has already processed. Makes restarts and re-scans safe. |
 
 **The central relationship: analyses attach to fingerprints, not to failures.** That is what makes
 dedup work. Five hundred failures sharing a fingerprint share one analysis and cost one model call.
@@ -52,7 +53,7 @@ prose, and this entire class of fragility disappears. Dedup is the system's prim
 its primary silent-failure risk; making it depend on regexes over log text when the tool writing
 that text is ours is a choice, not a constraint.
 
-The `failure.ibot_error` JSONB column exists to receive that metadata. Build §2.3's text path now
+A JSON column on `failure` can receive that metadata when it exists. Build §2.3's text path now
 because it is unblocked, but **treat structured emission as the target state**, and prefer the
 structured fields whenever they are present.
 
@@ -134,13 +135,19 @@ A fingerprint match is **necessary but not sufficient**. An existing analysis is
 
 1. Fingerprint matches **and** `fingerprint_version` matches, **and**
 2. Analysis is younger than `ANALYSIS_REUSE_TTL` (default **30 days**), **and**
-3. The bot's code at that location is unchanged — `code_commit_sha` matches, **and**
+3. The bot's code file is unchanged — `code_mtime` matches, **and**
 4. The analysis was not marked `wrong` by developer feedback
 
 **Condition 3 is the one that protects correctness.** If the code changed, the previous suggested
 fix may now be actively misleading — pointing a developer at a line that no longer exists, or
 recommending a change already made. A dedup system that ignores code version saves money by
 serving wrong answers.
+
+There is no version control here, so `code_mtime` is the best available proxy (`ARCHITECTURE.md`
+§4.5). It is weaker than a commit SHA in one specific way: **it detects that the file changed, never
+which version the bot was actually running.** A failure analysed today may be reasoning about code
+edited after it occurred. That case is flagged `code_possibly_stale` with a capped confidence rather
+than hidden.
 
 **Condition 4 closes the feedback loop.** An analysis developers marked wrong should not be served
 to the next five hundred failures. Feedback is not just future training data; it invalidates cache
@@ -166,8 +173,10 @@ Mitigations:
 
 | Entity | Retention | Trigger |
 |---|---|---|
-| `screenshot` (raw, quarantine) | 24 hours | Lifecycle + explicit delete |
-| `screenshot` (processed) | 30 days | Retention job |
+| `screenshot` (Mode 0) | **n/a — never copied** | Nothing to delete; the file stays on the VM share |
+| `screenshot` derivative (Modes 1–2) | 7 days | Retention job |
+| `scan_watermark` | 180 days | Retention job (keeps re-scan protection well past any backlog) |
+| HTML reports on the share | 90 days | Retention job |
 | `failure.log_sanitized` | 90 days | Retention job (nulls column, keeps row) |
 | `failure.code_snapshot` | 90 days | Retention job |
 | `failure` (row, metadata) | 24 months | Retention job |
@@ -185,222 +194,238 @@ and processes in chunks so a large backlog cannot lock the table.
 
 ---
 
-## 4. Schema (PostgreSQL DDL)
+## 4. Schema (SQLite DDL)
+
+SQLite, not Postgres: one host, one writer, tens of thousands of rows a year (§6). No server, no
+backup agent, no DBA. The schema is written to port to Postgres for the Phase 3 service — §8 lists
+what changes.
+
+Run with `PRAGMA foreign_keys = ON;` on every connection. SQLite does not enforce foreign keys by
+default, and a schema full of unenforced `REFERENCES` clauses is worse than none.
 
 ```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
 -- ---------- organisation ----------
 
 CREATE TABLE team (
-    id              BIGSERIAL PRIMARY KEY,
-    name            TEXT NOT NULL UNIQUE,
-    sso_group       TEXT NOT NULL UNIQUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    sso_group   TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE developer (
-    id              BIGSERIAL PRIMARY KEY,
-    sso_subject     TEXT NOT NULL UNIQUE,
-    email           TEXT NOT NULL UNIQUE,
-    display_name    TEXT NOT NULL,
-    team_id         BIGINT NOT NULL REFERENCES team(id),
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    id           INTEGER PRIMARY KEY,
+    email        TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    team_id      INTEGER NOT NULL REFERENCES team(id),
+    is_active    INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- service_line and bot_number come from the share path, not from log content.
 CREATE TABLE bot (
-    id              BIGSERIAL PRIMARY KEY,
-    external_id     TEXT NOT NULL,
-    source_platform TEXT NOT NULL DEFAULT 'ibot' CHECK (source_platform = 'ibot'),
-    name            TEXT NOT NULL,
-    vm_hostname     TEXT,
-    team_id         BIGINT NOT NULL REFERENCES team(id),
-    owner_dev_id    BIGINT REFERENCES developer(id),
-    repo_url        TEXT,
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_platform, external_id)
+    id            INTEGER PRIMARY KEY,
+    service_line  TEXT NOT NULL,
+    bot_number    TEXT NOT NULL,
+    name          TEXT,
+    team_id       INTEGER REFERENCES team(id),
+    owner_dev_id  INTEGER REFERENCES developer(id),
+    code_path     TEXT,                    -- resolved file in the shared code folder
+    is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (service_line, bot_number)
 );
--- source_platform is retained with a single-value CHECK rather than dropped: iBot is the only
--- platform today, and a one-line constraint change is cheaper than a migration if that stops
--- being true. No adapter framework is built for it — see ARCHITECTURE.md §3.
 
 -- ---------- known patterns ----------
 
 CREATE TABLE pattern (
-    id              BIGSERIAL PRIMARY KEY,
-    name            TEXT NOT NULL UNIQUE,
-    match_rule      JSONB NOT NULL,
+    id                INTEGER PRIMARY KEY,
+    name              TEXT NOT NULL UNIQUE,
+    match_rule        TEXT NOT NULL,       -- JSON
     response_template TEXT NOT NULL,
-    severity        TEXT NOT NULL CHECK (severity IN ('low','medium','high','critical')),
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    severity          TEXT NOT NULL CHECK (severity IN ('low','medium','high','critical')),
+    is_active         INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ---------- dedup ----------
 
 CREATE TABLE fingerprint (
-    id                  BIGSERIAL PRIMARY KEY,
-    hash                TEXT NOT NULL CHECK (char_length(hash) = 64),
-    version             SMALLINT NOT NULL,
-    exception_type      TEXT NOT NULL,
-    normalized_message  TEXT NOT NULL,
-    code_location       TEXT NOT NULL,
-    first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    occurrence_count    BIGINT NOT NULL DEFAULT 1,
-    pattern_id          BIGINT REFERENCES pattern(id),
-    expires_at          TIMESTAMPTZ NOT NULL,
+    id                 INTEGER PRIMARY KEY,
+    hash               TEXT NOT NULL CHECK (length(hash) = 64),
+    version            INTEGER NOT NULL,
+    exception_type     TEXT NOT NULL,
+    normalized_message TEXT NOT NULL,
+    code_location      TEXT NOT NULL,
+    first_seen_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    occurrence_count   INTEGER NOT NULL DEFAULT 1,
+    pattern_id         INTEGER REFERENCES pattern(id),
+    expires_at         TEXT NOT NULL,
     UNIQUE (hash, version)
 );
 
--- The index dedup performance depends on. Covers the hot lookup path.
-CREATE INDEX idx_fingerprint_lookup ON fingerprint (hash, version);
--- NOTE: hash is TEXT, not CHAR(64), deliberately. See §7.
+-- NOTE: no separate index on (hash, version). The UNIQUE constraint above already
+-- creates one, and SQLite uses it as a COVERING INDEX for the dedup lookup. A second
+-- index on the same columns would be dead weight on every write. Verified — see §7.
 CREATE INDEX idx_fingerprint_expiry ON fingerprint (expires_at);
 
 -- ---------- analyses ----------
 
 CREATE TABLE analysis (
-    id                  BIGSERIAL PRIMARY KEY,
-    fingerprint_id      BIGINT NOT NULL REFERENCES fingerprint(id),
-    source_failure_id   BIGINT,               -- FK added after failure table
-    path                TEXT NOT NULL
-        CHECK (path IN ('template','text','vision','fallback')),
-    model_id            TEXT,
-    code_commit_sha     TEXT,                 -- reuse gate: §2.6 condition 3
-    root_cause          TEXT,
-    suggested_fix       TEXT,
-    confidence          NUMERIC(3,2) CHECK (confidence BETWEEN 0 AND 1),
-    inputs_used         TEXT[] NOT NULL DEFAULT '{}',
-    is_superseded       BOOLEAN NOT NULL DEFAULT FALSE,
-    tokens_in           INTEGER,
-    tokens_out          INTEGER,
-    cache_read_tokens   INTEGER,
-    image_tokens        INTEGER,
-    cost_usd            NUMERIC(10,6),
-    latency_ms          INTEGER,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at          TIMESTAMPTZ NOT NULL
+    id                INTEGER PRIMARY KEY,
+    fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
+    source_failure_id INTEGER,             -- provenance only; never dereferenced cross-team (§5)
+    path              TEXT NOT NULL CHECK (path IN ('template','text','vision','fallback')),
+    model_id          TEXT,
+    code_mtime        TEXT,                -- pseudo-version; no VCS exists (ARCHITECTURE.md §4.5)
+    root_cause        TEXT,
+    suggested_fix     TEXT,
+    confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
+    inputs_used       TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    is_superseded     INTEGER NOT NULL DEFAULT 0 CHECK (is_superseded IN (0,1)),
+    tokens_in         INTEGER,
+    tokens_out        INTEGER,
+    cache_read_tokens INTEGER,
+    image_tokens      INTEGER,
+    cost_usd          REAL,
+    latency_ms        INTEGER,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at        TEXT NOT NULL
 );
 
 CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DESC)
-    WHERE is_superseded = FALSE;
+    WHERE is_superseded = 0;
 CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
 
 -- ---------- failures ----------
 
 CREATE TABLE failure (
-    id                  BIGSERIAL PRIMARY KEY,
-    bot_id              BIGINT NOT NULL REFERENCES bot(id),
-    fingerprint_id      BIGINT NOT NULL REFERENCES fingerprint(id),
-    analysis_id         BIGINT REFERENCES analysis(id),
-    run_id              TEXT,
-    occurred_at         TIMESTAMPTZ NOT NULL,
-    ingested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status              TEXT NOT NULL DEFAULT 'pending'
+    id                   INTEGER PRIMARY KEY,
+    bot_id               INTEGER NOT NULL REFERENCES bot(id),
+    fingerprint_id       INTEGER NOT NULL REFERENCES fingerprint(id),
+    analysis_id          INTEGER REFERENCES analysis(id),
+    occurred_at          TEXT NOT NULL,
+    ingested_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    status               TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','deduped','analyzing','analyzed','failed','suppressed')),
-    was_deduped         BOOLEAN NOT NULL DEFAULT FALSE,
-    log_sanitized       TEXT,                 -- nulled at 90 days
-    code_snapshot       TEXT,                 -- nulled at 90 days
-    code_commit_sha     TEXT,
-    severity            TEXT CHECK (severity IN ('low','medium','high','critical')),
-    correlation_id      UUID NOT NULL,
-    vm_hostname         TEXT,                 -- which VM produced it; ops triage, not authorization
-    emitter_kind        TEXT CHECK (emitter_kind IN ('ibot_native','sidecar')),
-    emitter_version     TEXT,                 -- for correlating bad data with an emitter release
-    spool_delay_ms      BIGINT,               -- occurred_at -> ingested_at gap; detects VM backlog
-    ibot_error          JSONB NOT NULL DEFAULT '{}',  -- structured metadata if iBot emits it
-    platform_extras     JSONB NOT NULL DEFAULT '{}',
-    content_expires_at  TIMESTAMPTZ NOT NULL,
-    expires_at          TIMESTAMPTZ NOT NULL
+    was_deduped          INTEGER NOT NULL DEFAULT 0 CHECK (was_deduped IN (0,1)),
+
+    -- provenance: exactly where each input came from
+    log_path             TEXT NOT NULL,     -- UNC path on the VM share
+    screenshot_path      TEXT,              -- UNC path; NOT copied in Mode 0
+    code_path            TEXT,
+    code_mtime           TEXT,
+    code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
+    pairing_method       TEXT CHECK (pairing_method IN ('run_id','log_body','timestamp','none')),
+
+    log_sanitized        TEXT,              -- nulled at 90 days
+    code_snapshot        TEXT,              -- nulled at 90 days
+    severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
+    correlation_id       TEXT NOT NULL,
+    content_expires_at   TEXT NOT NULL,
+    expires_at           TEXT NOT NULL
 );
 
-ALTER TABLE analysis
-    ADD CONSTRAINT fk_analysis_source_failure
-    FOREIGN KEY (source_failure_id) REFERENCES failure(id);
-
--- Emitters deliver at-least-once and retry after network failures; this makes retries free.
-CREATE UNIQUE INDEX idx_failure_idempotency ON failure (bot_id, run_id) WHERE run_id IS NOT NULL;
-CREATE INDEX idx_failure_bot_time   ON failure (bot_id, occurred_at DESC);
-CREATE INDEX idx_failure_fingerprint ON failure (fingerprint_id, occurred_at DESC);
-CREATE INDEX idx_failure_status     ON failure (status) WHERE status IN ('pending','analyzing');
-CREATE INDEX idx_failure_feed       ON failure (occurred_at DESC);
+-- The scanner is restartable and re-reads folders; this makes a re-scan a no-op.
+CREATE UNIQUE INDEX idx_failure_idempotency ON failure (log_path);
+CREATE INDEX idx_failure_bot_time     ON failure (bot_id, occurred_at DESC);
+CREATE INDEX idx_failure_fingerprint  ON failure (fingerprint_id, occurred_at DESC);
+CREATE INDEX idx_failure_pending      ON failure (status) WHERE status IN ('pending','analyzing');
+CREATE INDEX idx_failure_feed         ON failure (occurred_at DESC);
 CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
     WHERE log_sanitized IS NOT NULL;
 
--- ---------- screenshots ----------
+-- ---------- screenshots (metadata only; no image bytes, no copy in Mode 0) ----------
 
 CREATE TABLE screenshot (
-    id                  BIGSERIAL PRIMARY KEY,
-    failure_id          BIGINT NOT NULL UNIQUE REFERENCES failure(id) ON DELETE CASCADE,
-    s3_bucket           TEXT NOT NULL,
-    s3_key              TEXT NOT NULL,
-    processing_mode     SMALLINT NOT NULL CHECK (processing_mode BETWEEN 0 AND 3),
-    was_redacted        BOOLEAN NOT NULL DEFAULT FALSE,
-    was_cropped         BOOLEAN NOT NULL DEFAULT FALSE,
-    sent_to_model       BOOLEAN NOT NULL DEFAULT FALSE,
-    width_px            INTEGER,
-    height_px           INTEGER,
-    bytes               BIGINT,
-    captured_at         TIMESTAMPTZ,
-    processed_at        TIMESTAMPTZ,
-    expires_at          TIMESTAMPTZ NOT NULL,
-    deleted_at          TIMESTAMPTZ
+    id              INTEGER PRIMARY KEY,
+    failure_id      INTEGER NOT NULL UNIQUE REFERENCES failure(id) ON DELETE CASCADE,
+    unc_path        TEXT NOT NULL,
+    processing_mode INTEGER NOT NULL CHECK (processing_mode BETWEEN 0 AND 3),
+    derivative_path TEXT,                  -- Modes 1-2 only; NULL in Mode 0
+    was_cropped     INTEGER NOT NULL DEFAULT 0 CHECK (was_cropped IN (0,1)),
+    was_redacted    INTEGER NOT NULL DEFAULT 0 CHECK (was_redacted IN (0,1)),
+    sent_to_model   INTEGER NOT NULL DEFAULT 0 CHECK (sent_to_model IN (0,1)),
+    width_px        INTEGER,
+    height_px       INTEGER,
+    bytes           INTEGER,
+    captured_at     TEXT,
+    expires_at      TEXT,                  -- derivative only; NULL when nothing was copied
+    deleted_at      TEXT
 );
 
-CREATE INDEX idx_screenshot_expiry ON screenshot (expires_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_screenshot_derivative_expiry ON screenshot (expires_at)
+    WHERE derivative_path IS NOT NULL AND deleted_at IS NULL;
 
 -- ---------- feedback ----------
 
 CREATE TABLE feedback (
-    id              BIGSERIAL PRIMARY KEY,
-    analysis_id     BIGINT NOT NULL REFERENCES analysis(id),
-    failure_id      BIGINT NOT NULL REFERENCES failure(id),
-    developer_id    BIGINT NOT NULL REFERENCES developer(id),
-    verdict         TEXT NOT NULL CHECK (verdict IN ('correct','partial','wrong')),
-    comment         TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id           INTEGER PRIMARY KEY,
+    analysis_id  INTEGER NOT NULL REFERENCES analysis(id),
+    failure_id   INTEGER NOT NULL REFERENCES failure(id),
+    developer_id INTEGER NOT NULL REFERENCES developer(id),
+    verdict      TEXT NOT NULL CHECK (verdict IN ('correct','partial','wrong')),
+    comment      TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (analysis_id, developer_id)
 );
 
 CREATE INDEX idx_feedback_analysis ON feedback (analysis_id);
-CREATE INDEX idx_feedback_wrong ON feedback (analysis_id) WHERE verdict = 'wrong';
+CREATE INDEX idx_feedback_wrong    ON feedback (analysis_id) WHERE verdict = 'wrong';
+
+-- ---------- scanner watermark ----------
+
+CREATE TABLE scan_watermark (
+    file_path     TEXT PRIMARY KEY,        -- UNC path of a processed file
+    file_mtime    TEXT NOT NULL,
+    file_size     INTEGER NOT NULL,
+    processed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    outcome       TEXT NOT NULL CHECK (outcome IN ('ingested','skipped','error'))
+);
+
+CREATE INDEX idx_watermark_processed ON scan_watermark (processed_at DESC);
 
 -- ---------- audit ----------
 
 CREATE TABLE audit_event (
-    id              BIGSERIAL PRIMARY KEY,
-    actor_sub       TEXT NOT NULL,
-    actor_role      TEXT NOT NULL,
-    action          TEXT NOT NULL,
-    resource_type   TEXT NOT NULL,
-    resource_id     TEXT NOT NULL,
-    outcome         TEXT NOT NULL CHECK (outcome IN ('allow','deny')),
-    source_ip       INET,
-    correlation_id  UUID,
-    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    id             INTEGER PRIMARY KEY,
+    actor          TEXT NOT NULL,
+    actor_role     TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    resource_type  TEXT NOT NULL,
+    resource_id    TEXT NOT NULL,
+    outcome        TEXT NOT NULL CHECK (outcome IN ('allow','deny')),
+    correlation_id TEXT,
+    occurred_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_audit_actor    ON audit_event (actor_sub, occurred_at DESC);
+CREATE INDEX idx_audit_actor    ON audit_event (actor, occurred_at DESC);
 CREATE INDEX idx_audit_resource ON audit_event (resource_type, resource_id, occurred_at DESC);
 CREATE INDEX idx_audit_denials  ON audit_event (occurred_at DESC) WHERE outcome = 'deny';
 
-REVOKE UPDATE, DELETE ON audit_event FROM PUBLIC;
+-- SQLite has no GRANT/REVOKE, so append-only is enforced by trigger instead.
+CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit_event
+BEGIN SELECT RAISE(ABORT, 'audit_event is append-only'); END;
+
+CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_event
+BEGIN SELECT RAISE(ABORT, 'audit_event is append-only'); END;
 
 -- ---------- notification suppression ----------
 
 CREATE TABLE notification_state (
-    id                  BIGSERIAL PRIMARY KEY,
-    fingerprint_id      BIGINT NOT NULL REFERENCES fingerprint(id),
-    developer_id        BIGINT NOT NULL REFERENCES developer(id),
-    first_notified_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_notified_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    suppressed_count    INTEGER NOT NULL DEFAULT 0,
+    id                INTEGER PRIMARY KEY,
+    fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
+    developer_id      INTEGER NOT NULL REFERENCES developer(id),
+    first_notified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_notified_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    suppressed_count  INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fingerprint_id, developer_id)
 );
 ```
-
----
 
 ## 5. The cross-team reuse constraint
 
@@ -433,23 +458,50 @@ At 2,000 failures/day — the top of the projected range:
 | `failure` | ~730K | Content nulled at 90 days; rows kept 24 months |
 | `fingerprint` | ~20–60K | Grows far slower than failures — that is the dedup working |
 | `analysis` | ~60–150K | One per unique fingerprint per code version |
-| `screenshot` | ~730K rows, ~30 days of objects | ~150 GB in S3 at 30-day retention, 300 KB/image |
+| `screenshot` | ~730K rows | **Metadata only — no image bytes stored. Under 100 MB.** |
+| `scan_watermark` | ~1.5M | One row per file seen; pruned at 180 days |
 | `audit_event` | ~3–5M | The largest table. Partition by month. |
 
-Comfortably a single Postgres instance. `audit_event` gets monthly partitioning from day one — it
-is the only table where retrofitting partitioning later would be painful.
+Comfortably a single SQLite file — on the order of a few GB a year at the top of the range, most of
+it `audit_event` and `scan_watermark`. Well inside what SQLite handles with one writer.
+
+Not storing image bytes is what keeps this small. The previous design projected ~150 GB of S3 for
+screenshots; Mode 0 stores none, because the files already exist somewhere we can read.
 
 ---
 
-## 7. Why `fingerprint.hash` is TEXT and not CHAR(64)
+## 7. Verified index and type behaviour
 
-A 64-character hex digest looks like the textbook case for `CHAR(64)`. It is a trap, and it breaks
-the one index the system's economics depend on.
+Both of the following were checked by executing the schema, not by reasoning about it.
 
-`CHAR(n)` is `bpchar`, a distinct type from `text`. The index `idx_fingerprint_lookup` is then built
-with `bpchar_ops`. When an application binds a normal string parameter — which every driver and ORM
-does — Postgres receives `text`, cannot match it against a `bpchar` operator class, and casts the
-*column* instead. Verified on PostgreSQL 16 with 20,000 rows:
+### 7.1 The dedup index already exists — do not add a second one
+
+`UNIQUE (hash, version)` creates an index. Adding `CREATE INDEX ... ON fingerprint (hash, version)`
+on top of it produces a duplicate that SQLite never chooses, while still costing a write on every
+insert. Confirmed on 5,000 rows:
+
+```
+EXPLAIN QUERY PLAN SELECT id FROM fingerprint WHERE hash=? AND version=1;
+--> SEARCH fingerprint USING COVERING INDEX sqlite_autoindex_fingerprint_1 (hash=? AND version=?)
+```
+
+"Covering" means the lookup is satisfied from the index alone without touching the table — the best
+case for the hottest query in the system. The earlier draft carried the redundant index; it has been
+removed.
+
+**Assert the plan in the test suite.** One test that runs `EXPLAIN QUERY PLAN` on the dedup lookup
+and asserts a `SEARCH ... USING ... INDEX` (never `SCAN`) is the cheapest possible guard against a
+regression whose only symptom would be an unexplained rise in cost and latency.
+
+### 7.2 Keep `hash` as TEXT when this ports to Postgres
+
+A 64-character hex digest invites `CHAR(64)`. In Postgres that is a trap, and it breaks exactly the
+index above.
+
+`CHAR(n)` is `bpchar`, a distinct type from `text`, so the index is built with `bpchar_ops`. When an
+application binds an ordinary string parameter — which every driver and ORM does — Postgres receives
+`text`, cannot match the operator class, and casts the *column* instead. Verified on PostgreSQL 16
+with 20,000 rows:
 
 ```
 -- hash CHAR(64), parameter bound as text:
@@ -457,21 +509,40 @@ Seq Scan on fingerprint
   Filter: ((version = 1) AND ((hash)::text = '...'::text))
 
 -- hash TEXT, same query:
-Index Scan using idx_fingerprint_lookup on fp2
+Index Scan using idx_fingerprint_lookup
   Index Cond: ((hash = '...'::text) AND (version = 1))
 ```
 
-The failure mode is nasty: it is silent, it is correct, and it only hurts at scale. Dedup lookups
-sit on the ingestion hot path and run once per failure — a sequential scan over a growing
-fingerprint table during an incident spike is exactly when it matters most, and nothing in the
-application reports anything wrong. Cost and latency degrade together with no error to trace.
+Silent, correct, and only expensive at scale — a sequential scan over a growing fingerprint table on
+the hot path, with nothing in the application reporting a problem. `CHAR(n)` also blank-pads to
+width, so a value compares equal to itself plus trailing spaces.
 
-(`CHAR(n)` also blank-pads to width, so a shorter value silently compares equal to itself plus
-trailing spaces. Two reasons to avoid it; the index one is the expensive one.)
+SQLite has no `bpchar`, so this does not bite today. It is recorded because the Phase 3 port is
+where it would, and the length `CHECK` gives the same guarantee without the type.
 
-`TEXT` with a `CHECK` constraint gives the same length guarantee and an index the planner will
-actually use.
+---
 
-**Verify this when the migrations land.** Add an `EXPLAIN` assertion to the test suite for the dedup
-lookup, asserting an index scan. That is the cheapest possible guard against a regression that
-would otherwise show up only as an unexplained cost increase.
+## 8. Porting to Postgres (Phase 3)
+
+The Phase 3 service needs concurrent writers and multi-user access, which SQLite is not for. The
+schema is written so the port is mechanical:
+
+| SQLite | Postgres |
+|---|---|
+| `INTEGER PRIMARY KEY` | `BIGSERIAL PRIMARY KEY` |
+| `TEXT` datetimes | `TIMESTAMPTZ` |
+| `TEXT` holding JSON | `JSONB` |
+| `TEXT` JSON arrays (`inputs_used`) | `TEXT[]` |
+| `INTEGER` booleans + CHECK | `BOOLEAN` |
+| `REAL` | `NUMERIC(10,6)` for money, `NUMERIC(3,2)` for confidence |
+| Append-only triggers on `audit_event` | `REVOKE UPDATE, DELETE` |
+| `correlation_id TEXT` | `UUID` |
+
+Two things that do **not** carry over automatically:
+
+- **Partial indexes** exist in both, with the same syntax — no change needed.
+- **`REAL` for `cost_usd` is acceptable in SQLite and wrong in Postgres.** Use `NUMERIC` there;
+  binary floating point accumulating a monthly spend figure will drift.
+
+Partition `audit_event` by month at that point. It is the only table where retrofitting partitioning
+would be painful, and at 2,000 failures/day it is by far the largest.
