@@ -1,6 +1,7 @@
 """Persistence: schema fidelity, repositories, the reuse gate, retention."""
 from __future__ import annotations
 
+import sqlite3
 import re
 import shutil
 import sys
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eagle_eyes.storage import (  # noqa: E402
     ADMIN, MANAGER, USER, AccessDenied, AnalysisRepo, BotRepo, Database,
     FailureRepo, FeedbackRepo, FingerprintRepo, Principal, Repository,
-    SCHEMA_PATH, WatermarkRepo, now, run_retention,
+    SCHEMA_PATH, SCHEMA_VERSION, WatermarkRepo, now, run_retention,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,18 +52,110 @@ def test_schema_matches_the_doc() -> None:
           blocks[0].strip() == in_file[ddl_start:].strip())
 
 
+def test_migration_lands_where_a_fresh_schema_does() -> None:
+    """A migrated database must be indistinguishable from a freshly created one.
+
+    Two ways to build the same schema is two things to keep in step, and nobody
+    notices when they drift -- the old install just behaves slightly differently
+    forever. So this builds a v1 database the way v1 actually looked, migrates
+    it, and compares every table, index and trigger against schema.sql.
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        full = SCHEMA_PATH.read_text()
+        v1 = full.split("-- ---------- accounts ----------")[0].replace(
+            "CHECK (processing_mode IN (0, 3))", "CHECK (processing_mode BETWEEN 0 AND 3)")
+        con = sqlite3.connect(str(d / "old.db"))
+        con.executescript(v1)
+        # A row recording a protection that was never applied -- mode 2 claimed
+        # crop and OCR-redaction, and no such code ever existed.
+        con.execute("INSERT INTO team(name) VALUES ('ops')")
+        con.execute("INSERT INTO developer(email, display_name, team_id)"
+                    " VALUES ('d@x','D',1)")
+        con.execute("INSERT INTO bot(service_line, bot_number) VALUES ('SL','B1')")
+        con.execute("INSERT INTO fingerprint(hash, version, exception_type,"
+                    " normalized_message, code_location, expires_at)"
+                    " VALUES (?,1,'E','m','l.cs:1','2030-01-01')", ("a" * 64,))
+        con.execute("INSERT INTO failure(bot_id, fingerprint_id, occurred_at,"
+                    " log_path, correlation_id, content_expires_at, expires_at)"
+                    " VALUES (1,1,'2026-01-01','/l.txt','c','2030-01-01','2030-01-01')")
+        con.execute("INSERT INTO screenshot(failure_id, unc_path, processing_mode,"
+                    " was_cropped, was_redacted) VALUES (1,'/s.png',2,1,1)")
+        con.execute("PRAGMA user_version = 1")
+        con.commit()
+        con.close()
+
+        migrated = Database(d / "old.db")
+        fresh = Database(d / "new.db")
+
+        v = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        check("the migration stamps the new version", v == SCHEMA_VERSION, str(v))
+
+        def shape(db):
+            out = {}
+            for r in db.conn.execute(
+                    "SELECT type, name, sql FROM sqlite_master"
+                    " WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"):
+                sql = re.sub(r"--[^\n]*", "", r["sql"] or "")       # comments differ
+                sql = re.sub(r'"(\w+)"', r"\1", sql)                 # RENAME quotes the name
+                out[(r["type"], r["name"])] = re.sub(r"\s+", " ", sql).strip()
+            return out
+
+        a, b = shape(migrated), shape(fresh)
+        check("the same set of objects exists", set(a) == set(b),
+              str(set(a) ^ set(b)))
+        differing = sorted(k for k in set(a) & set(b) if a[k] != b[k])
+        check("and each is defined identically", not differing, str(differing))
+
+        row = migrated.conn.execute(
+            "SELECT processing_mode, was_cropped, was_redacted FROM screenshot"
+        ).fetchone()
+        check("a mode 2 row is rewritten to what actually happened to it",
+              tuple(row) == (3, 0, 0), str(tuple(row)))
+        refused = False
+        try:
+            migrated.conn.execute(
+                "INSERT INTO screenshot(failure_id, unc_path, processing_mode)"
+                " VALUES (99,'/x.png',1)")
+        except sqlite3.IntegrityError:
+            refused = True
+        check("and the upgraded table refuses a new mode 1 row", refused)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_schema_gap_is_refused_not_guessed() -> None:
+    """No migration for a version means stop, not carry on and hope."""
+    db, d = _db()
+    try:
+        db.conn.execute("PRAGMA user_version = 1")
+        import eagle_eyes.storage as st
+        saved = st.MIGRATIONS
+        st.MIGRATIONS = {}
+        try:
+            db.migrate()
+            check("a missing migration is refused", False)
+        except RuntimeError as e:
+            check("a missing migration is refused", "no migration" in str(e))
+            check("  and it names both versions", "1" in str(e) and "2" in str(e))
+        finally:
+            st.MIGRATIONS = saved
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_migrate_is_idempotent() -> None:
     db, d = _db()
     try:
         v = db.conn.execute("PRAGMA user_version").fetchone()[0]
-        check("schema version is stamped", v == 1, str(v))
+        check("schema version is stamped", v == SCHEMA_VERSION, str(v))
         db.migrate()
         db.migrate()
         check("re-running migrate is harmless", True)
         n = db.conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
             " AND name NOT LIKE 'sqlite_%'").fetchone()[0]
-        check("all tables created", n == 12, str(n))
+        check("all tables created", n == 15, str(n))
         db.conn.execute("PRAGMA user_version = 99")
         try:
             db.migrate()

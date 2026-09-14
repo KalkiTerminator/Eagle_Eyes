@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def now() -> str:
@@ -94,6 +94,96 @@ class AccessDenied(PermissionError):
 # Database
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Migrations
+#
+# Each entry upgrades FROM the previous version TO its key. A database created
+# fresh runs schema.sql instead and skips all of them, so every migration here
+# must leave the database in the same shape schema.sql would have produced --
+# tests/test_storage.py compares the two directly rather than trusting that.
+# --------------------------------------------------------------------------
+
+MIGRATION_2 = """
+CREATE TABLE account (
+    id             INTEGER PRIMARY KEY,
+    email          TEXT NOT NULL UNIQUE,
+    display_name   TEXT NOT NULL,
+    password_hash  TEXT NOT NULL,
+    salt           TEXT NOT NULL,
+    params         TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'requested'
+                   CHECK (status IN ('requested','approved','suspended','revoked')),
+    role           TEXT NOT NULL DEFAULT 'user'
+                   CHECK (role IN ('admin','manager','user')),
+    developer_id   INTEGER REFERENCES developer(id),
+    approved_by    TEXT,
+    approved_at    TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at  TEXT,
+    failed_logins  INTEGER NOT NULL DEFAULT 0,
+    locked_until   TEXT
+);
+
+CREATE INDEX idx_account_status ON account (status, role);
+
+CREATE TABLE account_scope (
+    account_id  INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    team_id     INTEGER NOT NULL REFERENCES team(id),
+    granted_by  TEXT NOT NULL,
+    granted_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, team_id)
+);
+
+CREATE TABLE session (
+    id           TEXT PRIMARY KEY,
+    account_id   INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    user_agent   TEXT,
+    revoked_at   TEXT
+);
+
+CREATE INDEX idx_session_account ON session (account_id) WHERE revoked_at IS NULL;
+CREATE INDEX idx_session_expiry  ON session (expires_at);
+
+-- Tighten screenshot.processing_mode from BETWEEN 0 AND 3 to IN (0, 3).
+-- SQLite cannot alter a CHECK constraint, so the table is rebuilt. Any existing
+-- row claiming mode 1 or 2 is rewritten to 3, which is what actually happened to
+-- it: the image was sent as captured, uncropped and unredacted. Leaving the row
+-- saying "cropped" would preserve a false record of a protection that was never
+-- applied, which is the whole point of removing the modes.
+UPDATE screenshot SET processing_mode = 3, was_cropped = 0, was_redacted = 0
+ WHERE processing_mode IN (1, 2);
+
+CREATE TABLE screenshot_new (
+    id              INTEGER PRIMARY KEY,
+    failure_id      INTEGER NOT NULL UNIQUE REFERENCES failure(id) ON DELETE CASCADE,
+    unc_path        TEXT NOT NULL,
+    processing_mode INTEGER NOT NULL CHECK (processing_mode IN (0, 3)),
+    derivative_path TEXT,
+    was_cropped     INTEGER NOT NULL DEFAULT 0 CHECK (was_cropped IN (0,1)),
+    was_redacted    INTEGER NOT NULL DEFAULT 0 CHECK (was_redacted IN (0,1)),
+    sent_to_model   INTEGER NOT NULL DEFAULT 0 CHECK (sent_to_model IN (0,1)),
+    width_px        INTEGER,
+    height_px       INTEGER,
+    bytes           INTEGER,
+    captured_at     TEXT,
+    expires_at      TEXT,
+    deleted_at      TEXT
+);
+
+INSERT INTO screenshot_new SELECT * FROM screenshot;
+DROP TABLE screenshot;
+ALTER TABLE screenshot_new RENAME TO screenshot;
+
+CREATE INDEX idx_screenshot_derivative_expiry ON screenshot (expires_at)
+    WHERE derivative_path IS NOT NULL AND deleted_at IS NULL;
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2}
+
+
 class Database:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -110,11 +200,22 @@ class Database:
         if current == 0:
             self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
             self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif current > SCHEMA_VERSION:
+            return
+        if current > SCHEMA_VERSION:
             raise RuntimeError(
                 f"{self.path} was written by a newer version (schema {current}, "
                 f"this build understands {SCHEMA_VERSION}). Upgrade rather than "
                 f"risk writing data an older build cannot read.")
+        while current < SCHEMA_VERSION:
+            step = MIGRATIONS.get(current + 1)
+            if step is None:
+                raise RuntimeError(
+                    f"{self.path} is at schema {current} and this build wants "
+                    f"{SCHEMA_VERSION}, but no migration to {current + 1} exists. "
+                    "Refusing to run against a schema nobody described.")
+            self.conn.executescript(step)
+            current += 1
+            self.conn.execute(f"PRAGMA user_version = {current}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -170,6 +271,18 @@ class BotRepo(Repository):
             "INSERT INTO bot(service_line, bot_number, code_path) VALUES (?,?,?)",
             (service_line, bot_number, code_path))
         return cur.lastrowid
+
+    def set_owner(self, bot_id: int, developer_email: str) -> None:
+        """Who owns this bot. What a plain user's visibility is computed from."""
+        dev_id = DeveloperRepo(self.db, self.p).ensure(developer_email)
+        self.db.conn.execute("UPDATE bot SET owner_dev_id=? WHERE id=?",
+                             (dev_id, bot_id))
+        self._audit("set_owner", "bot", bot_id)
+
+    def set_team(self, bot_id: int, team: str) -> None:
+        team_id = DeveloperRepo(self.db, self.p)._team_id(team)
+        self.db.conn.execute("UPDATE bot SET team_id=? WHERE id=?", (team_id, bot_id))
+        self._audit("set_team", "bot", bot_id)
 
 
 class FingerprintRepo(Repository):
@@ -271,33 +384,100 @@ class FailureRepo(Repository):
         except sqlite3.IntegrityError:
             return None
 
-    def recent(self, limit: int = 50) -> list[sqlite3.Row]:
-        rows = self.db.conn.execute(
-            "SELECT f.*, b.service_line, b.bot_number, a.root_cause, a.confidence"
-            " FROM failure f JOIN bot b ON b.id=f.bot_id"
-            " LEFT JOIN analysis a ON a.id=f.analysis_id"
-            " ORDER BY f.occurred_at DESC LIMIT ?", (limit,)).fetchall()
-        return [r for r in rows if self._visible(r)]
+    SELECT_ = ("SELECT f.*, b.service_line, b.bot_number, b.owner_dev_id,"
+               " a.root_cause, a.confidence, a.suggested_fix, a.path, a.model_id"
+               " FROM failure f JOIN bot b ON b.id=f.bot_id"
+               " LEFT JOIN analysis a ON a.id=f.analysis_id")
+
+    def _scope_sql(self) -> tuple[str, list[Any]]:
+        """The WHERE clause that implements the role, in SQL.
+
+        In SQL rather than in Python because a filter applied after LIMIT is not
+        a filter -- it is a page that silently comes back short, and the first
+        time anyone notices is when a manager reports missing failures and
+        somebody "fixes" it by widening the query. Scoping has to happen where
+        the rows are selected.
+
+          admin    everything.
+          manager  the service lines named in their scope, and nothing else.
+                   An empty scope means no rows, never all rows.
+          user     failures on bots they own. Ownership is `bot.owner_dev_id`
+                   resolved to a developer email; an account with no developer
+                   record owns nothing and sees nothing.
+        """
+        if self.p.is_admin:
+            return "", []
+        if self.p.role == MANAGER:
+            if not self.p.scope:
+                return " AND 0", []
+            marks = ",".join("?" for _ in self.p.scope)
+            return f" AND b.service_line IN ({marks})", sorted(self.p.scope)
+        return (" AND b.owner_dev_id IN"
+                " (SELECT id FROM developer WHERE email = ?)", [self.p.actor.lower()])
+
+    def recent(self, limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
+        where, args = self._scope_sql()
+        sql = f"{self.SELECT_} WHERE 1{where} ORDER BY f.occurred_at DESC LIMIT ? OFFSET ?"
+        return self.db.conn.execute(sql, [*args, max(1, min(limit, 500)),
+                                          max(0, offset)]).fetchall()
+
+    def get(self, failure_id: int) -> sqlite3.Row:
+        """One failure, or AccessDenied.
+
+        Deliberately the same answer for "does not exist" and "not yours": a
+        distinguishable 404 lets anyone enumerate which ids are real and which
+        teams are busy. The denial is audited, which is the point of having an
+        audit log -- a run of them from one actor is the signal.
+        """
+        where, args = self._scope_sql()
+        row = self.db.conn.execute(
+            f"{self.SELECT_} WHERE f.id = ?{where}", [failure_id, *args]).fetchone()
+        if row is None:
+            self._audit("read", "failure", failure_id, outcome="deny")
+            raise AccessDenied(f"no failure {failure_id} is visible to {self.p.actor}")
+        return row
+
+    def visible_count(self) -> int:
+        where, args = self._scope_sql()
+        return self.db.conn.execute(
+            f"SELECT COUNT(*) n FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" WHERE 1{where}", args).fetchone()["n"]
 
     def _visible(self, row: sqlite3.Row) -> bool:
-        """Scoping applied here, where the rows are, not at a route.
+        """Whether one already-fetched row is in scope.
 
-        Local installs run as admin so this is always True today. It exists so
-        that when the server arrives the filter is already in the one place
-        every read passes through.
+        Kept as the single readable statement of the rule; `_scope_sql` is the
+        same rule expressed where it can be enforced. A test asserts the two
+        agree row for row, because two copies of a rule is how a rule rots.
         """
         if self.p.is_admin:
             return True
         if self.p.role == MANAGER:
             return self.p.may_see_team(row["service_line"])
-        return True
+        if row["owner_dev_id"] is None:
+            return False
+        owner = self.db.conn.execute(
+            "SELECT email FROM developer WHERE id=?", (row["owner_dev_id"],)).fetchone()
+        return bool(owner) and owner["email"] == self.p.actor.lower()
 
     def stats(self) -> dict[str, Any]:
+        """Counts over what this principal can see, never over the whole estate.
+
+        A dedup rate or a spend figure computed over every row would leak the
+        size and cost of teams the reader has no access to.
+        """
+        where, args = self._scope_sql()
         c = self.db.conn
-        total = c.execute("SELECT COUNT(*) FROM failure").fetchone()[0]
-        deduped = c.execute("SELECT COUNT(*) FROM failure WHERE was_deduped=1").fetchone()[0]
-        spend = c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM analysis").fetchone()[0]
-        fps = c.execute("SELECT COUNT(*) FROM fingerprint").fetchone()[0]
+        base = f"FROM failure f JOIN bot b ON b.id=f.bot_id WHERE 1{where}"
+        total = c.execute(f"SELECT COUNT(*) {base}", args).fetchone()[0]
+        deduped = c.execute(
+            f"SELECT COUNT(*) {base} AND f.was_deduped=1", args).fetchone()[0]
+        spend = c.execute(
+            f"SELECT COALESCE(SUM(a.cost_usd),0) FROM analysis a WHERE a.id IN"
+            f" (SELECT f.analysis_id {base} AND f.analysis_id IS NOT NULL)",
+            args).fetchone()[0]
+        fps = c.execute(
+            f"SELECT COUNT(DISTINCT f.fingerprint_id) {base}", args).fetchone()[0]
         return {"failures": total, "deduped": deduped, "fingerprints": fps,
                 "dedup_rate": (deduped / total) if total else 0.0,
                 "spend_usd": spend}

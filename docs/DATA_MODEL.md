@@ -443,8 +443,11 @@ CREATE TABLE screenshot (
     id              INTEGER PRIMARY KEY,
     failure_id      INTEGER NOT NULL UNIQUE REFERENCES failure(id) ON DELETE CASCADE,
     unc_path        TEXT NOT NULL,
-    processing_mode INTEGER NOT NULL CHECK (processing_mode BETWEEN 0 AND 3),
-    derivative_path TEXT,                  -- Modes 1-2 only; NULL in Mode 0
+    -- Only the modes that exist. 1 (crop) and 2 (crop + OCR-redact) are
+    -- designed in SECURITY.md 3.3 and unimplemented; a row claiming one
+    -- would assert a protection nothing applied. See analysis.SCREENSHOT_MODES.
+    processing_mode INTEGER NOT NULL CHECK (processing_mode IN (0, 3)),
+    derivative_path TEXT,                  -- Modes 1-2 only; always NULL today
     was_cropped     INTEGER NOT NULL DEFAULT 0 CHECK (was_cropped IN (0,1)),
     was_redacted    INTEGER NOT NULL DEFAULT 0 CHECK (was_redacted IN (0,1)),
     sent_to_model   INTEGER NOT NULL DEFAULT 0 CHECK (sent_to_model IN (0,1)),
@@ -523,6 +526,70 @@ CREATE TABLE notification_state (
     suppressed_count  INTEGER NOT NULL DEFAULT 0,
     UNIQUE (fingerprint_id, developer_id)
 );
+
+-- ---------- accounts ----------
+--
+-- `developer` is a person a bot belongs to. `account` is a person who can sign
+-- in. They are deliberately separate: a manager who owns no bots still needs a
+-- login, and a developer who never uses the web UI still needs to receive
+-- notifications and own failures.
+--
+-- Nothing is granted at registration. An account starts `requested` and can
+-- sign in immediately -- and see nothing -- until an admin approves it with a
+-- role. Sign-in and authorisation are different questions, and conflating them
+-- is how "pending" accounts end up with read access nobody granted.
+
+CREATE TABLE account (
+    id             INTEGER PRIMARY KEY,
+    email          TEXT NOT NULL UNIQUE,
+    display_name   TEXT NOT NULL,
+    -- scrypt. `salt` and `password_hash` are hex; `params` records n/r/p so a
+    -- future cost increase can re-hash on next sign-in instead of locking
+    -- everyone out.
+    password_hash  TEXT NOT NULL,
+    salt           TEXT NOT NULL,
+    params         TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'requested'
+                   CHECK (status IN ('requested','approved','suspended','revoked')),
+    role           TEXT NOT NULL DEFAULT 'user'
+                   CHECK (role IN ('admin','manager','user')),
+    developer_id   INTEGER REFERENCES developer(id),
+    approved_by    TEXT,
+    approved_at    TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at  TEXT,
+    failed_logins  INTEGER NOT NULL DEFAULT 0,
+    locked_until   TEXT
+);
+
+CREATE INDEX idx_account_status ON account (status, role);
+
+-- A manager's scope: the teams they may see failures for. A row here is
+-- meaningless for an admin (who sees everything) and for a user (who sees only
+-- their own), so the application never reads it for those roles.
+CREATE TABLE account_scope (
+    account_id  INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    team_id     INTEGER NOT NULL REFERENCES team(id),
+    granted_by  TEXT NOT NULL,
+    granted_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, team_id)
+);
+
+-- Server-side sessions. The cookie carries an id and a signature; everything
+-- that decides access is read from here on each request, so revoking an account
+-- takes effect on its next request rather than whenever its cookie expires.
+CREATE TABLE session (
+    id           TEXT PRIMARY KEY,          -- 256 bits of urandom, hex
+    account_id   INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    user_agent   TEXT,
+    revoked_at   TEXT
+);
+
+CREATE INDEX idx_session_account ON session (account_id) WHERE revoked_at IS NULL;
+CREATE INDEX idx_session_expiry  ON session (expires_at);
 ```
 
 ## 5. The cross-team reuse constraint
