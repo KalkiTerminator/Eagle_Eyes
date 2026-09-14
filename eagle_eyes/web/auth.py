@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .. import storage
 from ..storage import (
     ADMIN, MANAGER, USER, AccessDenied, Database, DeveloperRepo, Principal,
     Repository, now,
@@ -159,7 +160,12 @@ class AccountRepo(Repository):
                 " status, role, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (email, display_name.strip() or email.split("@")[0],
                  pw_hash, salt, params, REQUESTED, USER, now()))
-        except sqlite3.IntegrityError:
+        # storage.INTEGRITY_ERRORS, not a name imported from it: the tuple grows
+        # when storage_pg registers psycopg's type, and `from x import y` would
+        # have captured whatever it held at import time. A stale tuple here
+        # turns a taken email address into a 500 -- which is also an answer to
+        # "is this address registered".
+        except storage.INTEGRITY_ERRORS:
             # Do not say whether the address is taken -- that is a free
             # membership oracle for anyone with a list of emails.
             raise AuthError("registration could not be completed") from None

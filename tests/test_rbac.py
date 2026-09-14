@@ -10,6 +10,7 @@ docs/SECURITY.md section 6.4 requires exactly this shape of test.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -38,10 +39,31 @@ PASSWORD = "correct-horse-battery-staple"
 ADMIN_P = Principal("root@x.com", ADMIN)
 
 
+# Every test here runs against SQLite by default and against PostgreSQL when
+# EAGLE_EYES_TEST_DSN names one. That is the point of running them twice: an
+# access rule that holds on one dialect and not the other is a rule that holds
+# in development and not in production, and nothing in the code would say so.
+# `WHERE 1` was exactly that -- SQLite reads an integer as a condition and
+# PostgreSQL refuses it, and the clause it would have broken is the one making
+# an empty manager scope mean no rows.
+TEST_DSN = os.environ.get("EAGLE_EYES_TEST_DSN", "").strip()
+
+
+def _fresh_db(d: Path):
+    if not TEST_DSN:
+        return Database(d / "rbac.db")
+    from eagle_eyes.storage_pg import PostgresDatabase
+    import psycopg
+    with psycopg.connect(TEST_DSN, autocommit=True) as c:
+        c.execute("DROP SCHEMA public CASCADE")
+        c.execute("CREATE SCHEMA public")
+    return PostgresDatabase(TEST_DSN)
+
+
 def _world() -> tuple[Database, Path, dict]:
     """Two service lines, two owners, one failure each. The setup every test uses."""
     d = Path(tempfile.mkdtemp())
-    db = Database(d / "rbac.db")
+    db = _fresh_db(d)
 
     bots = BotRepo(db, ADMIN_P)
     fps = FingerprintRepo(db, ADMIN_P)

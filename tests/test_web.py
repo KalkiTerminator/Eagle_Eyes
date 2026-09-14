@@ -11,6 +11,7 @@ suites run on the standard library alone, and that is a property worth keeping.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -46,10 +47,36 @@ ENV = {
 }
 
 
+# As in test_rbac.py: the same suite runs against PostgreSQL when
+# EAGLE_EYES_TEST_DSN is set, so the deployed dialect is the tested one.
+TEST_DSN = os.environ.get("EAGLE_EYES_TEST_DSN", "").strip()
+
+
 def _client(**extra) -> tuple[TestClient, Path]:
     d = Path(tempfile.mkdtemp())
-    app = create_app(d / "web.db", {**ENV, **extra})
+    env = {**ENV, **extra}
+    if TEST_DSN:
+        import psycopg
+        with psycopg.connect(TEST_DSN, autocommit=True) as c:
+            c.execute("DROP SCHEMA public CASCADE")
+            c.execute("CREATE SCHEMA public")
+        env["DATABASE_URL"] = TEST_DSN
+    app = create_app(d / "web.db", env)
     return TestClient(app), d
+
+
+def _cleanup(c, d: Path) -> None:
+    """Close the database as well as removing the directory.
+
+    Against PostgreSQL the app holds a connection pool. Eighteen tests leaving
+    eighteen pools open is the same leak a long-running deployment would have,
+    so the tests are made to notice it rather than being given a pass.
+    """
+    try:
+        c.app.state.ee.db.close()
+    except Exception:
+        pass
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def _register(c, email, password=USER_PASSWORD) -> None:
@@ -141,7 +168,7 @@ def test_public_pages() -> None:
         check("the register page renders", c.get("/register").status_code == 200)
         check("API docs are not exposed", c.get("/openapi.json").status_code == 404)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_anonymous_is_sent_to_sign_in_not_shown_data() -> None:
@@ -157,7 +184,7 @@ def test_anonymous_is_sent_to_sign_in_not_shown_data() -> None:
                   r.headers.get("location", "").startswith("/login"),
                   r.headers.get("location", ""))
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # ------------------------------------------------------------ the gate
@@ -183,7 +210,7 @@ def test_a_pending_account_gets_a_login_and_nothing_else() -> None:
               c.post("/admin/approve",
                      data={"account_id": 1, "role": "admin"}).status_code == 403)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_the_full_journey() -> None:
@@ -231,7 +258,7 @@ def test_the_full_journey() -> None:
         check("the failure appears on the home page",
               str(failure_id) in c.get("/app").text)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # --------------------------------------------------------- horizontal access
@@ -270,7 +297,7 @@ def test_one_user_cannot_read_anothers_failure_over_http() -> None:
               c.post(f"/failures/{failure_id}/feedback",
                      data={"verdict": "correct"}).status_code == 404)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_a_job_belongs_to_the_person_who_started_it() -> None:
@@ -298,7 +325,7 @@ def test_a_job_belongs_to_the_person_who_started_it() -> None:
         check("nor its status, which carries the failure id",
               c.get(f"/jobs/{job_id}/status").status_code == 404)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # ---------------------------------------------------------------- escalation
@@ -326,7 +353,7 @@ def test_a_forged_or_stale_cookie_gets_nothing() -> None:
             check(f"{label} is treated as anonymous", r.status_code == 303,
                   str(r.status_code))
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_suspension_ends_a_live_session() -> None:
@@ -355,7 +382,7 @@ def test_suspension_ends_a_live_session() -> None:
         check("the suspended user's existing cookie stops working immediately",
               r.status_code == 303, str(r.status_code))
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_a_manager_sees_their_scope_and_no_more() -> None:
@@ -394,7 +421,7 @@ def test_a_manager_sees_their_scope_and_no_more() -> None:
         check("the manager sees the failure in their scope",
               c.get(f"/failures/{failure_id}").status_code == 200)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # -------------------------------------------------------------------- ingest
@@ -430,7 +457,7 @@ def test_uploads_are_validated_not_trusted() -> None:
                    files={"log": ("big.log", b"x" * (9 * 1024 * 1024), "text/plain")})
         check("an oversized log is refused", "the limit is" in r.text)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_an_upload_says_how_it_is_degraded() -> None:
@@ -459,7 +486,7 @@ def test_an_upload_says_how_it_is_degraded() -> None:
         check("the stored pairing method is 'uploaded', not a claimed pairing",
               r.status_code == 200)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # --------------------------------------------------------------------- spend
@@ -483,7 +510,7 @@ def test_the_kill_switch_stops_spending_without_a_redeploy() -> None:
               r.status_code == 200 and "kill switch" in r.text, str(r.status_code))
         check("  and it says nothing was charged", "nothing was charged" in r.text)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_the_hourly_cap_is_per_person() -> None:
@@ -512,7 +539,7 @@ def test_the_hourly_cap_is_per_person() -> None:
         check("and another person is unaffected by it",
               _submit(c).status_code == 303)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 def test_spend_is_read_from_the_database_not_a_counter() -> None:
@@ -534,7 +561,7 @@ def test_spend_is_read_from_the_database_not_a_counter() -> None:
         check("  and says where the figure comes from",
               "committed analyses" in r.text)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 # ------------------------------------------------------------------ injection
@@ -564,7 +591,7 @@ def test_untrusted_content_is_escaped_in_the_page() -> None:
         check("the report is isolated in a sandboxed frame",
               "sandbox" in page and "<iframe" in page)
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        _cleanup(c, d)
 
 
 if __name__ == "__main__":

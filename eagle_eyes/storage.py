@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def now() -> str:
@@ -89,6 +89,21 @@ class Principal:
 
 class AccessDenied(PermissionError):
     pass
+
+
+# Which exception means "a constraint said no". sqlite3 and psycopg raise
+# different types for the same event, and the places that catch it -- the
+# idempotent failure insert, the registration that must not confirm an address
+# is taken -- are exactly the places where catching the wrong one turns a
+# handled case into a 500. storage_pg extends this on import; it is looked up at
+# raise time, so the order of imports does not matter.
+INTEGRITY_ERRORS: tuple[type[BaseException], ...] = (sqlite3.IntegrityError,)
+
+
+def register_integrity_error(exc_type: type[BaseException]) -> None:
+    global INTEGRITY_ERRORS
+    if exc_type not in INTEGRITY_ERRORS:
+        INTEGRITY_ERRORS = (*INTEGRITY_ERRORS, exc_type)
 
 
 # --------------------------------------------------------------------------
@@ -234,7 +249,48 @@ CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
     WHERE log_sanitized IS NOT NULL;
 """
 
-MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3}
+MIGRATION_4 = """
+-- Widen analysis.path to every value analysis.Path_ can produce. It listed four
+-- of six, so a deduplicated or skipped analysis could not be stored -- the
+-- insert failed the CHECK. SQLite cannot alter a CHECK, so the table is rebuilt.
+CREATE TABLE analysis_new (
+    id                INTEGER PRIMARY KEY,
+    fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
+    source_failure_id INTEGER,             -- provenance only; never dereferenced cross-team (§5)
+    -- Every value analysis.Path_ can produce. It used to list four of the six,
+    -- so an analysis that came back from the dedup store or was skipped for
+    -- want of an exception could not be written down at all -- the two
+    -- outcomes the design is proudest of. A test now derives this list from
+    -- the enum rather than trusting the two to stay in step.
+    path              TEXT NOT NULL CHECK (path IN
+                          ('dedup','template','text','vision','fallback','skipped')),
+    model_id          TEXT,
+    code_mtime        TEXT,                -- pseudo-version; no VCS exists (ARCHITECTURE.md §4.5)
+    root_cause        TEXT,
+    suggested_fix     TEXT,
+    confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
+    inputs_used       TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    is_superseded     INTEGER NOT NULL DEFAULT 0 CHECK (is_superseded IN (0,1)),
+    tokens_in         INTEGER,
+    tokens_out        INTEGER,
+    cache_read_tokens INTEGER,
+    image_tokens      INTEGER,
+    cost_usd          REAL,
+    latency_ms        INTEGER,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at        TEXT NOT NULL
+);
+
+INSERT INTO analysis_new SELECT * FROM analysis;
+DROP TABLE analysis;
+ALTER TABLE analysis_new RENAME TO analysis;
+
+CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DESC)
+    WHERE is_superseded = 0;
+CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4}
 
 
 # How long a writer waits for another writer before giving up. SQLite allows
@@ -339,6 +395,16 @@ class Database:
             raise
         self.conn.execute("COMMIT")
 
+    @staticmethod
+    def encode_list(values) -> str:
+        """A list of strings, as this dialect stores it.
+
+        SQLite has no array type, so `inputs_used` is JSON in a TEXT column.
+        PostgreSQL has TEXT[] and refuses the JSON string with "malformed array
+        literal". One method rather than a dialect check at the call site.
+        """
+        return json.dumps(list(values))
+
     def close(self) -> None:
         """Close every thread's connection, not just this thread's."""
         with self._lock:
@@ -349,6 +415,35 @@ class Database:
             except sqlite3.Error:
                 pass
         self._local = threading.local()
+
+
+DATABASE_URL_VAR = "DATABASE_URL"
+
+
+def open_database(target: "Path | str | None" = None,
+                  env: dict[str, str] | None = None):
+    """The database this process should use: PostgreSQL if a DSN is set, else SQLite.
+
+    One function so nothing else has to know which it got. The CLI passes a path
+    and gets SQLite; a container sets DATABASE_URL and gets PostgreSQL without a
+    code change, which is what Railway and every other platform hands you.
+    """
+    import os
+    env = env if env is not None else os.environ
+    dsn = (env.get(DATABASE_URL_VAR) or "").strip()
+    if dsn:
+        if dsn.startswith("postgres://"):
+            # Several platforms still emit the old scheme; psycopg wants the
+            # current one, and the failure without this is an unhelpful
+            # "missing connection parameter".
+            dsn = "postgresql://" + dsn[len("postgres://"):]
+        from .storage_pg import PostgresDatabase
+        return PostgresDatabase(dsn)
+    if target is None:
+        raise ValueError(
+            "no DATABASE_URL and no path given -- refusing to guess where the "
+            "database should live.")
+    return Database(target)
 
 
 # --------------------------------------------------------------------------
@@ -436,7 +531,7 @@ class FingerprintRepo(Repository):
         cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
                   - timedelta(days=within_days)).isoformat(timespec="seconds")
         sql = ("SELECT a.* FROM analysis a"
-               " WHERE a.fingerprint_id=? AND a.is_superseded=0 AND a.created_at >= ?"
+               " WHERE a.fingerprint_id=? AND a.is_superseded = FALSE AND a.created_at >= ?"
                "   AND NOT EXISTS (SELECT 1 FROM feedback f"
                "                   WHERE f.analysis_id=a.id AND f.verdict='wrong')")
         params: list[Any] = [fp_id, cutoff]
@@ -458,7 +553,7 @@ class AnalysisRepo(Repository):
             " suggested_fix, confidence, inputs_used, tokens_in, tokens_out, cost_usd,"
             " latency_ms, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fingerprint_id, path, model_id, code_mtime, root_cause, suggested_fix,
-             confidence, json.dumps(list(inputs_used)), tokens_in, tokens_out,
+             confidence, self.db.encode_list(inputs_used), tokens_in, tokens_out,
              cost_usd, latency_ms, now(), _plus(retain_days)))
         self._audit("create", "analysis", cur.lastrowid)
         return cur.lastrowid
@@ -470,7 +565,7 @@ class AnalysisRepo(Repository):
         return row
 
     def supersede(self, analysis_id: int) -> None:
-        self.db.conn.execute("UPDATE analysis SET is_superseded=1 WHERE id=?",
+        self.db.conn.execute("UPDATE analysis SET is_superseded = TRUE WHERE id=?",
                              (analysis_id,))
         self._audit("supersede", "analysis", analysis_id)
 
@@ -497,11 +592,11 @@ class FailureRepo(Repository):
                 " code_snapshot, correlation_id, content_expires_at, expires_at)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bot_id, fingerprint_id, analysis_id, occurred_at, now(), status,
-                 int(was_deduped), log_path, screenshot_path, code_path, code_mtime,
-                 int(code_possibly_stale), pairing_method, log_sanitized, code_snapshot,
+                 bool(was_deduped), log_path, screenshot_path, code_path, code_mtime,
+                 bool(code_possibly_stale), pairing_method, log_sanitized, code_snapshot,
                  correlation_id, _plus(content_days), _plus(retain_days)))
             return cur.lastrowid
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             return None
 
     SELECT_ = ("SELECT f.*, b.service_line, b.bot_number, b.owner_dev_id,"
@@ -511,6 +606,12 @@ class FailureRepo(Repository):
 
     def _scope_sql(self) -> tuple[str, list[Any]]:
         """The WHERE clause that implements the role, in SQL.
+
+        Written in the subset both dialects share: TRUE and FALSE rather than
+        1 and 0. SQLite treats an integer as a condition and PostgreSQL refuses
+        it ("argument of WHERE must be type boolean"), and the place that would
+        have bitten is `AND FALSE` -- the clause that makes an empty manager
+        scope mean no rows.
 
         In SQL rather than in Python because a filter applied after LIMIT is not
         a filter -- it is a page that silently comes back short, and the first
@@ -529,7 +630,7 @@ class FailureRepo(Repository):
             return "", []
         if self.p.role == MANAGER:
             if not self.p.scope:
-                return " AND 0", []
+                return " AND FALSE", []
             marks = ",".join("?" for _ in self.p.scope)
             return f" AND b.service_line IN ({marks})", sorted(self.p.scope)
         return (" AND b.owner_dev_id IN"
@@ -537,7 +638,7 @@ class FailureRepo(Repository):
 
     def recent(self, limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
         where, args = self._scope_sql()
-        sql = f"{self.SELECT_} WHERE 1{where} ORDER BY f.occurred_at DESC LIMIT ? OFFSET ?"
+        sql = f"{self.SELECT_} WHERE TRUE{where} ORDER BY f.occurred_at DESC LIMIT ? OFFSET ?"
         return self.db.conn.execute(sql, [*args, max(1, min(limit, 500)),
                                           max(0, offset)]).fetchall()
 
@@ -561,7 +662,7 @@ class FailureRepo(Repository):
         where, args = self._scope_sql()
         return self.db.conn.execute(
             f"SELECT COUNT(*) n FROM failure f JOIN bot b ON b.id=f.bot_id"
-            f" WHERE 1{where}", args).fetchone()["n"]
+            f" WHERE TRUE{where}", args).fetchone()["n"]
 
     def _visible(self, row: sqlite3.Row) -> bool:
         """Whether one already-fetched row is in scope.
@@ -588,10 +689,10 @@ class FailureRepo(Repository):
         """
         where, args = self._scope_sql()
         c = self.db.conn
-        base = f"FROM failure f JOIN bot b ON b.id=f.bot_id WHERE 1{where}"
+        base = f"FROM failure f JOIN bot b ON b.id=f.bot_id WHERE TRUE{where}"
         total = c.execute(f"SELECT COUNT(*) {base}", args).fetchone()[0]
         deduped = c.execute(
-            f"SELECT COUNT(*) {base} AND f.was_deduped=1", args).fetchone()[0]
+            f"SELECT COUNT(*) {base} AND f.was_deduped = TRUE", args).fetchone()[0]
         spend = c.execute(
             f"SELECT COALESCE(SUM(a.cost_usd),0) FROM analysis a WHERE a.id IN"
             f" (SELECT f.analysis_id {base} AND f.analysis_id IS NOT NULL)",
@@ -615,9 +716,17 @@ class FeedbackRepo(Repository):
             verdict: str, comment: str = "") -> None:
         if verdict not in ("correct", "partial", "wrong"):
             raise ValueError(f"verdict must be correct/partial/wrong, got {verdict!r}")
+        # ON CONFLICT rather than INSERT OR REPLACE: both dialects accept this
+        # form, and it also says WHICH conflict is being resolved. OR REPLACE
+        # deletes the existing row and inserts a new one, which fires ON DELETE
+        # CASCADE on anything referencing it -- a footgun that has nothing to do
+        # with "change this person's verdict".
         self.db.conn.execute(
-            "INSERT OR REPLACE INTO feedback(analysis_id, failure_id, developer_id,"
-            " verdict, comment, created_at) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO feedback(analysis_id, failure_id, developer_id,"
+            " verdict, comment, created_at) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(analysis_id, developer_id) DO UPDATE SET"
+            "   verdict = excluded.verdict, comment = excluded.comment,"
+            "   created_at = excluded.created_at",
             (analysis_id, failure_id, developer_id, verdict, comment, now()))
         self._audit("feedback", "analysis", analysis_id)
 
@@ -778,8 +887,11 @@ class WatermarkRepo(Repository):
 
     def mark(self, file_path: str, mtime: str, size: int, outcome: str = "ingested") -> None:
         self.db.conn.execute(
-            "INSERT OR REPLACE INTO scan_watermark(file_path, file_mtime, file_size,"
-            " processed_at, outcome) VALUES (?,?,?,?,?)",
+            "INSERT INTO scan_watermark(file_path, file_mtime, file_size,"
+            " processed_at, outcome) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(file_path) DO UPDATE SET"
+            "   file_mtime = excluded.file_mtime, file_size = excluded.file_size,"
+            "   processed_at = excluded.processed_at, outcome = excluded.outcome",
             (file_path, mtime, size, now(), outcome))
 
     def count(self) -> int:

@@ -34,7 +34,8 @@ from ..model_gateway import (
 from ..report import ReportInput, render
 from ..storage import (
     ADMIN, MANAGER, USER, AccessDenied, AnalysisRepo, BotRepo, Database,
-    DeveloperRepo, FailureRepo, FeedbackRepo, FingerprintRepo, Principal, now,
+    DeveloperRepo, FailureRepo, FeedbackRepo, FingerprintRepo, Principal,
+    now, open_database,
 )
 from . import spend
 from .auth import (
@@ -63,11 +64,14 @@ class AppState:
         if self.warning:
             print(f"  ! {self.warning}", flush=True)
 
-        if db_path is None:
+        # PostgreSQL when DATABASE_URL is set, SQLite otherwise -- the choice
+        # a platform makes for you by setting one variable. See
+        # storage.open_database and docs/DATA_MODEL.md section 8.
+        if not (self.env.get("DATABASE_URL") or "").strip() and db_path is None:
             base = runtime.data_dir()
             base.mkdir(parents=True, exist_ok=True)
             db_path = base / "eagle_eyes.db"
-        self.db = Database(db_path)
+        self.db = open_database(db_path, self.env)
         self.secret = self._secret()
         self.jobs = JobQueue(workers=2)
         self.environment = current_environment()
@@ -441,6 +445,7 @@ def create_app(db_path: Path | None = None,
     @app.on_event("shutdown")
     def shutdown() -> None:
         app.state.ee.jobs.stop()
+        app.state.ee.db.close()
 
     return app
 

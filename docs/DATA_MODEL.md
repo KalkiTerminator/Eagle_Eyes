@@ -375,7 +375,13 @@ CREATE TABLE analysis (
     id                INTEGER PRIMARY KEY,
     fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
     source_failure_id INTEGER,             -- provenance only; never dereferenced cross-team (§5)
-    path              TEXT NOT NULL CHECK (path IN ('template','text','vision','fallback')),
+    -- Every value analysis.Path_ can produce. It used to list four of the six,
+    -- so an analysis that came back from the dedup store or was skipped for
+    -- want of an exception could not be written down at all -- the two
+    -- outcomes the design is proudest of. A test now derives this list from
+    -- the enum rather than trusting the two to stay in step.
+    path              TEXT NOT NULL CHECK (path IN
+                          ('dedup','template','text','vision','fallback','skipped')),
     model_id          TEXT,
     code_mtime        TEXT,                -- pseudo-version; no VCS exists (ARCHITECTURE.md §4.5)
     root_cause        TEXT,
