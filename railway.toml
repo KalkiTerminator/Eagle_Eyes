@@ -1,0 +1,67 @@
+# Railway deployment.
+#
+# This instance runs on SYNTHETIC DATA ONLY. The product's security argument is
+# that client logs, screenshots and source never leave the estate that captured
+# them, and hosting on a third-party platform does not weaken that argument --
+# it means this particular deployment must never be pointed at real data.
+# docs/PRODUCTION_MIGRATION.md is the list of what changes before one can be.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# The health check is why seeding runs on a worker thread: generating the demo
+# estate and running the first analyses takes seconds, and a deploy that fails
+# its health check is rolled back while the logs show a successful seed.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+numReplicas = 1
+
+# Variables this service needs. Set them in the Railway dashboard, not here --
+# this file is in the repository.
+#
+#   REQUIRED
+#     EAGLE_EYES_SECRET_KEY      32+ random characters. Sessions are signed with
+#                                it; without one a key is generated at start-up
+#                                and every restart signs everyone out.
+#     EAGLE_EYES_ADMIN_EMAIL     The first administrator. Created once, on an
+#     EAGLE_EYES_ADMIN_PASSWORD  empty database, and recorded in the audit log.
+#                                Setting these later cannot mint a second admin.
+#
+#   THE MODEL
+#     EAGLE_EYES_BACKEND         mock | byok | bedrock. `mock` costs nothing and
+#                                needs no credentials; the pipeline still runs
+#                                end to end and every report says MOCK.
+#     ANTHROPIC_API_KEY          For byok. A development key, never a client's.
+#     EAGLE_EYES_BYOK_APPROVED_BY
+#                                byok sends prompt content to a third party, so
+#                                it is refused outside local development unless
+#                                someone is named here. See SECURITY.md 12.
+#
+#   MONEY -- real calls from a public URL
+#     EAGLE_EYES_DAILY_USD       default 2.00
+#     EAGLE_EYES_TOTAL_USD       default 25.00, a lifetime ceiling. A daily cap
+#                                alone still permits $60 a month unattended.
+#     EAGLE_EYES_HOURLY_ANALYSES default 20, per person
+#     EAGLE_EYES_DISABLE_MODEL   set to 1 to stop all spend with a restart and
+#                                no redeploy
+#
+#   STORAGE
+#     DATABASE_URL               Set by attaching a Railway PostgreSQL service.
+#                                Without it the app falls back to SQLite in
+#                                EAGLE_EYES_DATA_DIR, which needs a volume.
+#     EAGLE_EYES_DATA_DIR        /data, already set in the Dockerfile. Attach a
+#                                volume there for the SQLite path; the app warns
+#                                on start-up when data would land on the image
+#                                layer, which a deploy erases.
+#
+#   THE DEMO
+#     EAGLE_EYES_SEED            1 to populate on first boot. Runs once ever --
+#                                reseeding on each deploy would re-spend on each
+#                                deploy.
+#     EAGLE_EYES_SEED_ANALYSES   default 6. Distinct failures analysed for real;
+#                                the budget is spent on the most frequent
+#                                fingerprints, so the spike is covered.

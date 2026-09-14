@@ -96,5 +96,26 @@ def test_gitignore_covers_the_obvious() -> None:
         check(f".gitignore covers {pat}", pat in gi)
 
 
+def test_no_test_is_defined_after_the_runner() -> None:
+    """A test function below `if __name__ == "__main__"` never runs.
+
+    The module executes top to bottom, so run_all(globals()) is called before
+    anything defined beneath it exists. The file still imports, pytest still
+    collects the function, and running the file directly reports "All checks
+    passed" -- for a suite that quietly skipped it. This happened, to a test
+    written specifically to guard an optimisation.
+    """
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        marker = text.find('if __name__ == "__main__"')
+        if marker == -1:
+            check(f"{path.name} has a runner block", False)
+            continue
+        after = text[marker:]
+        stragglers = re.findall(r"^def (test_\w+)", after, re.M)
+        check(f"{path.name}: nothing is defined after the runner",
+              not stragglers, ", ".join(stragglers))
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

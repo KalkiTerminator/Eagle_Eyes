@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import shutil
 import sys
+import time
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -197,6 +198,72 @@ def test_corrupt_entry_is_ignored() -> None:
     finally:
         shutil.rmtree(d)
 
+
+
+
+def test_screenshot_rendering_is_unchanged_by_the_fast_path() -> None:
+    """write_png builds rows from slices instead of pixel by pixel.
+
+    The per-pixel version did 920,000 Python iterations per 1280x720 image, so
+    generating the 251-failure estate took a minute -- a minute a container
+    spends not answering its health check. The rewrite is ~25x faster and the
+    only thing that matters about it is that it draws the same picture, so the
+    reference implementation lives here and both are compared byte for byte.
+
+    It caught a real off-by-one: the original's comparisons are strict, and
+    turning `x < 0.94*width` into a slice bound needs ceil, not int. Using int
+    dropped the last column and the last row.
+    """
+    import struct
+    import zlib
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from make_fixtures import write_png
+
+    def reference(path, width, height, draw_dialog=True):
+        bg, win = (58, 84, 122), (240, 240, 240)
+        dialog, accent = (252, 252, 252), (196, 43, 43)
+        rows = []
+        dx0, dx1 = int(width * 0.30), int(width * 0.70)
+        dy0, dy1 = int(height * 0.35), int(height * 0.62)
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                px = win if (0.06 * width < x < 0.94 * width
+                             and 0.10 * height < y < 0.90 * height) else bg
+                if draw_dialog and dx0 <= x <= dx1 and dy0 <= y <= dy1:
+                    px = accent if y < dy0 + max(6, height // 40) else dialog
+                row += bytes(px)
+            rows.append(bytes(row))
+        raw = b"".join(b"\x00" + r for r in rows)
+
+        def chunk(tag, data):
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+        png = b"\x89PNG\r\n\x1a\n"
+        png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        png += chunk(b"IDAT", zlib.compress(raw, 6))
+        png += chunk(b"IEND", b"")
+        path.write_bytes(png)
+
+    d = Path(tempfile.mkdtemp())
+    try:
+        # Sizes chosen to hit both cases of the off-by-one: dimensions where
+        # 0.94*w lands on an integer and where it does not.
+        for w, h, dlg in ((64, 40, True), (100, 50, True), (101, 57, True),
+                          (50, 50, False), (200, 100, True), (320, 180, False)):
+            a, b = d / "ref.png", d / "fast.png"
+            reference(a, w, h, dlg)
+            write_png(b, w, h, dlg)
+            check(f"{w}x{h} dialog={dlg} renders identically",
+                  a.read_bytes() == b.read_bytes())
+
+        started = time.monotonic()
+        write_png(d / "big.png", 1280, 720)
+        elapsed = time.monotonic() - started
+        check("a full-size screenshot renders in well under a second",
+              elapsed < 0.5, f"{elapsed:.2f}s")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

@@ -29,6 +29,7 @@ import random
 import shutil
 import struct
 import zlib
+from math import ceil, floor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -38,27 +39,56 @@ from pathlib import Path
 
 
 def write_png(path: Path, width: int, height: int, draw_dialog: bool = True) -> None:
-    """Write an RGB PNG. Crudely mimics a desktop with an error dialog on it."""
-    bg = (58, 84, 122)          # desktop blue
-    win = (240, 240, 240)       # application window
-    dialog = (252, 252, 252)    # error dialog
-    accent = (196, 43, 43)      # error banner
+    """Write an RGB PNG. Crudely mimics a desktop with an error dialog on it.
 
-    rows = []
+    Rows are built from slices and memoised rather than pixel by pixel. The
+    image is horizontal bands, so only a handful of distinct rows exist in a
+    720-line screenshot -- the per-pixel version did 920,000 Python iterations
+    per file and made generating the 251-failure estate take a minute, which is
+    a minute a container spends not answering its health check.
+    """
+    bg = bytes((58, 84, 122))          # desktop blue
+    win = bytes((240, 240, 240))       # application window
+    dialog = bytes((252, 252, 252))    # error dialog
+    accent = bytes((196, 43, 43))      # error banner
+
     dx0, dx1 = int(width * 0.30), int(width * 0.70)
     dy0, dy1 = int(height * 0.35), int(height * 0.62)
+    # The original drew pixel by pixel with STRICT comparisons:
+    # `0.06*width < x < 0.94*width`. Turning that into half-open slice bounds
+    # is floor(v)+1 on the low side and ceil(v) on the high side -- int() on the
+    # high side drops the last column and the last row, which is one pixel of
+    # difference per edge and exactly the kind of thing an optimisation is
+    # expected to get wrong. A test renders both ways and compares bytes.
+    wx0, wx1 = floor(0.06 * width) + 1, ceil(0.94 * width)
+    wy0, wy1 = floor(0.10 * height) + 1, ceil(0.90 * height)
+    banner_end = dy0 + max(6, height // 40)
 
+    def band_row(inside_window: bool) -> bytes:
+        if not inside_window:
+            return bg * width
+        return bg * wx0 + win * (wx1 - wx0) + bg * (width - wx1)
+
+    def dialog_row(base: bytes, fill: bytes) -> bytes:
+        return base[: dx0 * 3] + fill * (dx1 - dx0 + 1) + base[(dx1 + 1) * 3:]
+
+    plain_outside = band_row(False)
+    plain_window = band_row(True)
+
+    cache: dict[tuple[bool, int], bytes] = {}
+    rows = []
     for y in range(height):
-        row = bytearray()
-        for x in range(width):
-            if 0.06 * width < x < 0.94 * width and 0.10 * height < y < 0.90 * height:
-                px = win
-            else:
-                px = bg
-            if draw_dialog and dx0 <= x <= dx1 and dy0 <= y <= dy1:
-                px = accent if y < dy0 + max(6, height // 40) else dialog
-            row += bytes(px)
-        rows.append(bytes(row))
+        in_window = wy0 <= y < wy1
+        kind = 0
+        if draw_dialog and dy0 <= y <= dy1:
+            kind = 1 if y < banner_end else 2
+        key = (in_window, kind)
+        row = cache.get(key)
+        if row is None:
+            base = plain_window if in_window else plain_outside
+            row = base if kind == 0 else dialog_row(base, accent if kind == 1 else dialog)
+            cache[key] = row
+        rows.append(row)
 
     raw = b"".join(b"\x00" + r for r in rows)  # filter byte 0 per scanline
 

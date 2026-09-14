@@ -1,0 +1,32 @@
+# Keep the build context small and, more importantly, keep things out of the
+# image that have no business being in one.
+
+.git
+.github
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.vscode
+
+# Synthetic fixtures are regenerated on demand; there is no reason to ship a
+# copy, and nothing that looks like captured data should be baked into an image.
+sandbox/
+fixtures/samples/generated/
+
+# Local databases, reports and anything holding analysis output.
+*.db
+*.db-wal
+*.db-shm
+reports/
+data/
+
+# Credentials, in every shape people leave them lying around.
+.env
+.env.*
+*.pem
+*.key

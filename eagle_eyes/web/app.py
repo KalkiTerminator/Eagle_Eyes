@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from .auth import (
 )
 from .ingest import IngestError, build_upload
 from .jobs import JobQueue
+from .seed import already_seeded, seed_if_asked, seed_wanted
 
 HERE = Path(__file__).resolve().parent
 SECRET_VAR = "EAGLE_EYES_SECRET_KEY"
@@ -76,6 +78,24 @@ class AppState:
         self.jobs = JobQueue(workers=2)
         self.environment = current_environment()
         bootstrap_from_env(self.db, self.env)
+        self.seed_summary: dict | None = None
+        self._start_seeding()
+
+    def _start_seeding(self) -> None:
+        """Populate the demo on a worker, never on the boot path.
+
+        Generating the estate and running the first analyses takes seconds.
+        Doing it before the server binds means the platform's health check
+        fails and the deploy is rolled back -- with the logs showing a
+        successful seed, which is a confusing way to spend an afternoon.
+        """
+        if not seed_wanted(self.env) or already_seeded(self.db):
+            return
+
+        def run() -> None:
+            self.seed_summary = seed_if_asked(self.db, self.engine, self.env)
+
+        threading.Thread(target=run, name="eagle-eyes-seed", daemon=True).start()
 
     def _secret(self) -> bytes:
         """The session signing key.
