@@ -118,7 +118,9 @@ that needs no screenshot sign-off to run at all.
 
 ### Scope
 
-- Screenshot policy worker: crop (Mode 1), then OCR-redact (Mode 2)
+- Screenshot policy worker: crop (Mode 1), then OCR-redact (Mode 2). Both modes are
+  currently rejected by `analysis.SCREENSHOT_MODES`; each is re-admitted in the same
+  change that implements it, never earlier (`SECURITY.md` §3.3)
 - Vision escalation gate in triage
 - Vision analysis path in `model_gateway`
 - Redaction quality test harness with a seeded-PII canary corpus

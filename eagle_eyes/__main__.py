@@ -54,8 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend", default="mock", choices=["mock", "bedrock", "byok"],
                     help="mock costs nothing and needs no credentials (default)")
     ap.add_argument("--region", default="", help="AWS region, for the bedrock backend")
-    ap.add_argument("--screenshot-mode", type=int, default=0, choices=[0, 1, 2, 3],
-                    help="0 = never send a screenshot to a model (default)")
+    ap.add_argument("--screenshot-mode", type=int, default=0, choices=[0, 3],
+                    help="0 = never send a screenshot to a model (default); "
+                         "3 = send it as captured, uncropped and unredacted. "
+                         "Modes 1 and 2 (crop, OCR-redact) are designed but not built; "
+                         "see docs/SECURITY.md section 7")
     ap.add_argument("--shared-cache", type=Path,
                     help="directory every install can reach, for shared dedup")
     ap.add_argument("--budget", type=float, default=2.00,
@@ -169,9 +172,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- analyse ----------------------------------------------------
     try:
+        # The environment is derived, never asserted here. Hardcoding "local"
+        # meant the byok governance guard could not fire on a deployed host --
+        # a guard that silently never runs (model_gateway.current_environment).
         backend = create_backend(
-            {"backend": args.backend, "region": args.region},
-            environment="local")
+            {"backend": args.backend, "region": args.region})
     except Exception as exc:
         print(f"\n  ! {exc}")
         return 3

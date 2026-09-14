@@ -28,6 +28,21 @@ from .fingerprint import Failure, fingerprint
 from .model_gateway import Backend, BudgetGuard, ModelReply, Usage
 from .sanitize import sanitize_code, sanitize_log
 
+# The screenshot policy modes that EXIST. docs/SECURITY.md section 7 designs
+# four; two of them are drawings.
+#
+#   0  the image is never read and never sent. The report links to where the
+#      bot wrote it, on a share the reader could already reach.
+#   3  the image is sent to the model exactly as captured -- whole desktop,
+#      whatever was on screen, nothing cropped and nothing redacted.
+#
+# Modes 1 (crop to the failing window) and 2 (crop, then OCR-redact) are the
+# ones worth having and neither is built. They are deliberately absent from
+# this set rather than accepted and quietly treated as mode 3: a mode that
+# claims to protect and does not is worse than no mode at all, because someone
+# picks it and stops worrying.
+SCREENSHOT_MODES = {0, 3}
+
 PROMPTS = Path(__file__).parent / "prompts"
 
 # Caps keep one runaway log from blowing the context window and the budget.
@@ -184,6 +199,13 @@ class Engine:
         self.models = models
         self.budget = budget or BudgetGuard()
         self.cache = cache
+        if screenshot_mode not in SCREENSHOT_MODES:
+            raise ValueError(
+                f"screenshot_mode {screenshot_mode} does not exist. "
+                f"Valid modes: {sorted(SCREENSHOT_MODES)}. "
+                "Modes 1 (crop) and 2 (OCR-redact) are designed in docs/SECURITY.md "
+                "section 7 but no such code has been written -- selecting one would "
+                "have sent the raw screenshot while reporting it protected.")
         self.screenshot_mode = screenshot_mode
         self.client_patterns = client_patterns or {}
         self.reuse_ttl = timedelta(days=reuse_ttl_days)

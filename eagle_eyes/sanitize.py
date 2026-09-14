@@ -134,7 +134,7 @@ def _protect(text: str) -> tuple[str, list[str]]:
 
 
 def _restore(text: str, frozen: list[str]) -> str:
-    """Restore in reverse, then sweep until stable.
+    r"""Restore in reverse, then sweep until stable.
 
     Protection patterns nest: `^\s+at .*$` swallows a whole stack frame that
     may already contain a frozen `:line 78`. Restoring forwards puts the outer

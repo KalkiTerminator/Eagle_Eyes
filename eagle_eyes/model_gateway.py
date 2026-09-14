@@ -31,6 +31,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 # --------------------------------------------------------------------------
@@ -55,6 +56,10 @@ PRICING = {
 }
 
 KEY_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}")
+
+# Seconds before a model call is abandoned. A hung provider must not hold a
+# worker until something further up the stack gives up first.
+DEFAULT_TIMEOUT_S = 120.0
 
 
 class BackendError(RuntimeError):
@@ -103,16 +108,59 @@ class ModelReply:
     raw: Any = None
 
 
+class SpendLedger(Protocol):
+    """Where historical spend is read from.
+
+    The point of the indirection: a counter held on the guard object resets
+    whenever the object does. In a CLI run that is the same thing as a day. In
+    a web service it is the same thing as a request, which makes a field called
+    `spent_day` a runaway spend hole with a reassuring name. A ledger backed by
+    the database gives the same API an answer that survives.
+    """
+
+    def spent_since(self, hours: float) -> float: ...
+    def spent_total(self) -> float: ...
+
+
+class MemoryLedger:
+    """In-process. Correct for one CLI run; never correct for a service."""
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[datetime, float]] = []
+
+    def record(self, cost: float) -> None:
+        self.entries.append((datetime.now(timezone.utc), cost))
+
+    def spent_since(self, hours: float) -> float:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        return sum(c for t, c in self.entries if t >= cutoff)
+
+    def spent_total(self) -> float:
+        return sum(c for _, c in self.entries)
+
+
 @dataclass
 class BudgetGuard:
-    """Checked BEFORE every call, never after."""
+    """Checked BEFORE every call, never after.
+
+    `daily_usd` and `total_usd` mean what they say only because they are read
+    from a ledger rather than from a field on this object.
+    """
     daily_usd: float = 2.00
     per_run_usd: float = 0.50
     single_call_usd: float = 0.05
+    total_usd: float | None = None          # hard lifetime ceiling; None = unlimited
+    ledger: SpendLedger | None = None
     spent_run: float = 0.0
-    spent_day: float = 0.0
+    enabled: bool = True                    # kill switch, no redeploy required
+
+    def __post_init__(self) -> None:
+        if self.ledger is None:
+            self.ledger = MemoryLedger()
 
     def check(self, projected: float) -> None:
+        if not self.enabled:
+            raise BackendError("model calls are disabled by the kill switch")
         if projected > self.single_call_usd:
             raise BackendError(
                 f"single call projected at ${projected:.4f}, cap is ${self.single_call_usd:.2f}")
@@ -120,14 +168,27 @@ class BudgetGuard:
             raise BackendError(
                 f"run budget ${self.per_run_usd:.2f} would be exceeded "
                 f"(spent ${self.spent_run:.4f})")
-        if self.spent_day + projected > self.daily_usd:
+        day = self.ledger.spent_since(24)
+        if day + projected > self.daily_usd:
             raise BackendError(
                 f"daily budget ${self.daily_usd:.2f} would be exceeded "
-                f"(spent ${self.spent_day:.4f})")
+                f"(spent ${day:.4f} in the last 24h)")
+        if self.total_usd is not None:
+            total = self.ledger.spent_total()
+            if total + projected > self.total_usd:
+                raise BackendError(
+                    f"lifetime cap ${self.total_usd:.2f} would be exceeded "
+                    f"(spent ${total:.4f})")
 
     def record(self, usage: Usage) -> None:
         self.spent_run += usage.cost_usd
-        self.spent_day += usage.cost_usd
+        if isinstance(self.ledger, MemoryLedger):
+            self.ledger.record(usage.cost_usd)
+        # A database-backed ledger reads committed rows; nothing to record here.
+
+    @property
+    def spent_day(self) -> float:
+        return self.ledger.spent_since(24) if self.ledger else 0.0
 
 
 class Backend(Protocol):
@@ -167,7 +228,8 @@ class BedrockBackend:
     """Claude on Amazon Bedrock. Inference stays in the client's AWS account."""
     name = "bedrock"
 
-    def __init__(self, region: str) -> None:
+    def __init__(self, region: str, timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        self.timeout = timeout
         if not region:
             raise BackendError("bedrock backend needs a region")
         self.region = region
@@ -179,7 +241,8 @@ class BedrockBackend:
         self._client = AnthropicBedrockMantle(aws_region=region)
 
     def complete(self, model, system, content, max_tokens=4096) -> ModelReply:
-        return _invoke(self._client, self.name, model, system, content, max_tokens)
+        return _invoke(self._client, self.name, model, system, content, max_tokens,
+                       self.timeout)
 
 
 class ByokBackend:
@@ -191,7 +254,8 @@ class ByokBackend:
     name = "byok"
 
     def __init__(self, api_key: str | None = None, key_file: Path | None = None,
-                 base_url: str | None = None) -> None:
+                 base_url: str | None = None, timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        self.timeout = timeout
         key = api_key or os.environ.get("ANTHROPIC_API_KEY") or _read_key_file(key_file)
         if not key:
             raise BackendError(
@@ -209,7 +273,8 @@ class ByokBackend:
         return f"ByokBackend(key={self._fingerprint})"
 
     def complete(self, model, system, content, max_tokens=4096) -> ModelReply:
-        return _invoke(self._client, self.name, model, system, content, max_tokens)
+        return _invoke(self._client, self.name, model, system, content, max_tokens,
+                       self.timeout)
 
 
 def _read_key_file(path: Path | None) -> str | None:
@@ -223,12 +288,18 @@ def _read_key_file(path: Path | None) -> str | None:
     return p.read_text(encoding="utf-8").strip() or None
 
 
+
 def _invoke(client, backend: str, model: str, system: str,
-            content: list[dict], max_tokens: int) -> ModelReply:
-    """One call shape for both real backends. The SDK surface is identical."""
+            content: list[dict], max_tokens: int,
+            timeout: float = DEFAULT_TIMEOUT_S) -> ModelReply:
+    """One call shape for both real backends. The SDK surface is identical.
+
+    An explicit timeout matters more in a service than in a CLI: without one a
+    hung provider holds a worker until something else gives up first.
+    """
     started = time.monotonic()
     try:
-        resp = client.messages.create(
+        resp = client.with_options(timeout=timeout).messages.create(
             model=model, max_tokens=max_tokens, system=system,
             messages=[{"role": "user", "content": content}],
         )
@@ -258,12 +329,33 @@ def _invoke(client, backend: str, model: str, system: str,
 LOCAL_ENVIRONMENTS = {"local", "dev", "sandbox"}
 
 
-def create_backend(cfg: dict, environment: str = "local") -> Backend:
+def current_environment() -> str:
+    """Where this process believes it is running.
+
+    Defaults to `production` whenever a server environment variable is present,
+    so a deployed instance cannot quietly inherit the permissive `local` rules
+    that the BYOK governance guard keys off. Getting this wrong in the safe
+    direction costs an extra config line; getting it wrong in the other
+    direction disables the guard silently.
+    """
+    explicit = os.environ.get("EAGLE_EYES_ENV")
+    if explicit:
+        return explicit.strip().lower()
+    server_markers = ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "PORT",
+                      "DYNO", "KUBERNETES_SERVICE_HOST", "WEBSITE_INSTANCE_ID")
+    if any(os.environ.get(m) for m in server_markers):
+        return "production"
+    return "local"
+
+
+def create_backend(cfg: dict, environment: str | None = None) -> Backend:
     """Build the configured backend, refusing byok outside local without a name.
 
     `cfg` is the `model:` block. `environment` comes from the profile.
     """
     kind = (cfg.get("backend") or "mock").lower()
+    if environment is None:
+        environment = current_environment()
 
     if kind == "byok" and environment.lower() not in LOCAL_ENVIRONMENTS:
         approver = (cfg.get("byok_approved_by") or "").strip()
@@ -277,13 +369,16 @@ def create_backend(cfg: dict, environment: str = "local") -> Backend:
                 "  If this has genuinely been approved, record who approved it in\n"
                 "  model.byok_approved_by. See docs/SECURITY.md section 12.")
 
+    timeout = float(cfg.get("timeout_s") or DEFAULT_TIMEOUT_S)
+
     if kind == "mock":
         return MockBackend()
     if kind == "bedrock":
-        return BedrockBackend(region=cfg.get("region", ""))
+        return BedrockBackend(region=cfg.get("region", ""), timeout=timeout)
     if kind == "byok":
         kf = cfg.get("key_file")
-        return ByokBackend(key_file=Path(kf) if kf else None, base_url=cfg.get("base_url"))
+        return ByokBackend(key_file=Path(kf) if kf else None,
+                           base_url=cfg.get("base_url"), timeout=timeout)
     raise BackendError(f"unknown backend '{kind}' (expected bedrock, byok or mock)")
 
 

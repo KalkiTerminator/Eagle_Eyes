@@ -16,7 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from eagle_eyes.analysis import Analysis, Engine, Path_, extract_json, validate  # noqa: E402
+from eagle_eyes.analysis import (  # noqa: E402
+    SCREENSHOT_MODES, Analysis, Engine, Path_, extract_json, validate,
+)
 from eagle_eyes.cache import SharedCache  # noqa: E402
 from eagle_eyes.model_gateway import BudgetGuard, ModelReply, Usage  # noqa: E402
 
@@ -106,13 +108,13 @@ def test_vision_gate() -> None:
     img = b"\x89PNG-not-really"
 
     b1 = ScriptedBackend(triage_json(needs=True), deep_json())
-    a1 = _engine(b1, screenshot_mode=1).analyse(log_text=LOG, code_text=CODE, image=img)
+    a1 = _engine(b1, screenshot_mode=3).analyse(log_text=LOG, code_text=CODE, image=img)
     check("triage asking for vision sends the image", b1.calls[1]["has_image"])
     check("and the path is recorded as vision", a1.path == Path_.VISION.value)
     check("screenshot is listed in inputs", "screenshot" in a1.inputs_used)
 
     b2 = ScriptedBackend(triage_json(needs=False), deep_json())
-    a2 = _engine(b2, screenshot_mode=1).analyse(log_text=LOG, code_text=CODE, image=img)
+    a2 = _engine(b2, screenshot_mode=3).analyse(log_text=LOG, code_text=CODE, image=img)
     check("triage declining vision withholds the image", not b2.calls[1]["has_image"])
     check("and the path is text", a2.path == Path_.TEXT.value)
 
@@ -124,9 +126,38 @@ def test_vision_gate() -> None:
 
     # Uncertain triage must not escalate.
     b4 = ScriptedBackend('{"category":"novel","confidence":0.3}', deep_json())
-    _engine(b4, screenshot_mode=1).analyse(log_text=LOG, code_text=CODE, image=img)
+    _engine(b4, screenshot_mode=3).analyse(log_text=LOG, code_text=CODE, image=img)
     check("a triage reply omitting the field defaults to no vision",
           not b4.calls[1]["has_image"])
+
+
+def test_modes_that_do_not_exist_are_refused() -> None:
+    """Modes 1 and 2 were selectable and did nothing they advertised.
+
+    The config offered crop (1) and OCR-redact (2). Neither had any code behind
+    it, so either one sent the screenshot exactly as captured while the operator
+    believed it had been cropped and scrubbed. That is a worse position than
+    mode 3, where at least the risk is stated. The modes are gone, and they are
+    gone loudly -- a config that still names one must fail, not fall back.
+    """
+    check("only the two built modes exist", SCREENSHOT_MODES == {0, 3})
+    for bad in (1, 2, 4, -1):
+        refused = False
+        try:
+            _engine(ScriptedBackend(triage_json(), deep_json()), screenshot_mode=bad)
+        except ValueError as e:
+            refused = "does not exist" in str(e)
+        check(f"mode {bad} is refused outright", refused)
+    check("  and the refusal says why rather than just 'invalid'",
+          "no such code has been written" in _mode_error(1))
+
+
+def _mode_error(mode: int) -> str:
+    try:
+        _engine(ScriptedBackend(triage_json(), deep_json()), screenshot_mode=mode)
+    except ValueError as e:
+        return str(e)
+    return ""
 
 
 def test_dedup_short_circuits() -> None:

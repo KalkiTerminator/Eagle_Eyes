@@ -327,6 +327,140 @@ class FeedbackRepo(Repository):
         return {r["verdict"]: r["n"] for r in rows}
 
 
+class DeveloperRepo(Repository):
+    """People. Notifications and feedback both need a stable id for one."""
+
+    UNASSIGNED = "unassigned"
+
+    def ensure(self, email: str, *, display_name: str = "",
+               team: str | None = None) -> int:
+        """Resolve an email to a developer id, creating the row if needed.
+
+        Creating on demand is deliberate. The alternative -- refusing to record
+        anything for an address not already in the table -- means notification
+        suppression silently does not apply to exactly the recipients nobody has
+        registered yet, which is the same failure A2 is about. New developers
+        land in the `unassigned` team, visible as such, rather than being
+        invented into somebody's real team.
+        """
+        email = email.strip().lower()
+        if not email:
+            raise ValueError("a developer needs an email")
+        row = self.db.conn.execute(
+            "SELECT id FROM developer WHERE email=?", (email,)).fetchone()
+        if row:
+            return row["id"]
+        team_id = self._team_id(team or self.UNASSIGNED)
+        cur = self.db.conn.execute(
+            "INSERT INTO developer(email, display_name, team_id, created_at)"
+            " VALUES (?,?,?,?)",
+            (email, display_name or email.split("@")[0], team_id, now()))
+        self._audit("create", "developer", cur.lastrowid)
+        return cur.lastrowid
+
+    def _team_id(self, name: str) -> int:
+        row = self.db.conn.execute(
+            "SELECT id FROM team WHERE name=?", (name,)).fetchone()
+        if row:
+            return row["id"]
+        cur = self.db.conn.execute(
+            "INSERT INTO team(name, created_at) VALUES (?,?)", (name, now()))
+        return cur.lastrowid
+
+    def team_of(self, email: str) -> str | None:
+        row = self.db.conn.execute(
+            "SELECT t.name FROM developer d JOIN team t ON t.id=d.team_id"
+            " WHERE d.email=?", (email.strip().lower(),)).fetchone()
+        return row["name"] if row else None
+
+
+class NotificationStateRepo(Repository):
+    """Durable notification suppression, over the `notification_state` table.
+
+    The in-memory version was correct for exactly as long as the process lived.
+    In a CLI run that is one scan, so the repeat window and the hourly cap did
+    what they claimed. In a service a new Notifier is built per request, so both
+    reset continuously: the cap that reads as "ten an hour" would send ten per
+    request, and an incident producing hundreds of failures would deliver
+    hundreds of mails -- the precise outcome the suppression rules exist to
+    prevent, and the one that gets the sender filtered to junk permanently.
+
+    This implements notify.SuppressionStore against the database, so the rules
+    survive a restart, a redeploy, and a second worker.
+    """
+
+    def _ids(self, to: str, fingerprint: str) -> tuple[int, int] | None:
+        fp = self.db.conn.execute(
+            "SELECT id FROM fingerprint WHERE hash=? ORDER BY version DESC LIMIT 1",
+            (fingerprint,)).fetchone()
+        if not fp:
+            return None
+        dev = DeveloperRepo(self.db, self.p).ensure(to)
+        return fp["id"], dev
+
+    def last_sent(self, to: str, fingerprint: str) -> datetime | None:
+        ids = self._ids(to, fingerprint)
+        if not ids:
+            return None
+        row = self.db.conn.execute(
+            "SELECT last_notified_at FROM notification_state"
+            " WHERE fingerprint_id=? AND developer_id=?", ids).fetchone()
+        if not row:
+            return None
+        return datetime.fromisoformat(row["last_notified_at"]).replace(tzinfo=timezone.utc)
+
+    def seen_count(self, to: str, fingerprint: str) -> int:
+        ids = self._ids(to, fingerprint)
+        if not ids:
+            return 0
+        row = self.db.conn.execute(
+            "SELECT suppressed_count FROM notification_state"
+            " WHERE fingerprint_id=? AND developer_id=?", ids).fetchone()
+        return (row["suppressed_count"] + 1) if row else 0
+
+    def bump_suppressed(self, to: str, fingerprint: str) -> int:
+        """Count one suppressed repeat. Returns total sightings including sends."""
+        ids = self._ids(to, fingerprint)
+        if not ids:
+            return 1
+        self.db.conn.execute(
+            "UPDATE notification_state SET suppressed_count = suppressed_count + 1"
+            " WHERE fingerprint_id=? AND developer_id=?", ids)
+        return self.seen_count(to, fingerprint)
+
+    def sent_in_last_hour(self, to: str, now: datetime | None = None) -> int:
+        ref = now or datetime.now(timezone.utc)
+        if ref.tzinfo:
+            ref = ref.astimezone(timezone.utc).replace(tzinfo=None)
+        cutoff = (ref - timedelta(hours=1)).isoformat(timespec="seconds")
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) n FROM notification_state ns"
+            " JOIN developer d ON d.id = ns.developer_id"
+            " WHERE d.email=? AND ns.last_notified_at >= ?",
+            (to.strip().lower(), cutoff)).fetchone()
+        return row["n"] if row else 0
+
+    def record_sent(self, to: str, fingerprint: str, when: datetime) -> None:
+        ids = self._ids(to, fingerprint)
+        if not ids:
+            # No fingerprint row means nothing durable to hang the state on.
+            # Say so rather than pretending the send was recorded.
+            raise LookupError(
+                f"fingerprint {fingerprint[:12]}... is not in the database; "
+                "record the failure before notifying about it")
+        stamp = when.astimezone(timezone.utc).replace(tzinfo=None).isoformat(
+            timespec="seconds")
+        self.db.conn.execute(
+            "INSERT INTO notification_state(fingerprint_id, developer_id,"
+            " first_notified_at, last_notified_at, suppressed_count)"
+            " VALUES (?,?,?,?,0)"
+            " ON CONFLICT(fingerprint_id, developer_id) DO UPDATE SET"
+            "   last_notified_at = excluded.last_notified_at,"
+            "   suppressed_count = 0",
+            (ids[0], ids[1], stamp, stamp))
+        self._audit("notify", "fingerprint", ids[0])
+
+
 class WatermarkRepo(Repository):
     """What the scanner has already processed.
 

@@ -35,10 +35,25 @@ import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+
+
+def _age(stamp: str) -> timedelta:
+    """How old a cache entry is, in UTC.
+
+    Entries written before this module moved to UTC carry a naive local-time
+    stamp. Subtracting an aware datetime from one of those raises, which would
+    turn a stale entry into a crash for everyone sharing the cache. Naive
+    stamps are read as local time -- the timezone they were written in -- so
+    the worst case is an entry expiring a few hours early.
+    """
+    written = datetime.fromisoformat(stamp)
+    if written.tzinfo is None:
+        written = written.astimezone()
+    return datetime.now(timezone.utc) - written
 
 
 @dataclass
@@ -51,7 +66,8 @@ class CachedAnalysis:
     path: str                       # template | text | vision | fallback
     model_id: str
     code_mtime: str | None = None   # pseudo-version; see ARCHITECTURE 4.5
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
     marked_wrong: bool = False
     schema_version: int = SCHEMA_VERSION
     written_by: str = ""            # which install wrote it, for troubleshooting
@@ -133,7 +149,7 @@ class SharedCache:
             self.stats["rejected"] += 1
             return None
         try:
-            if datetime.now() - datetime.fromisoformat(entry.created_at) > self.ttl:
+            if _age(entry.created_at) > self.ttl:
                 self.stats["stale"] += 1
                 return None
         except ValueError:

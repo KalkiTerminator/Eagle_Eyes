@@ -10,8 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.model_gateway import (  # noqa: E402
-    MODELS, BackendError, BudgetGuard, ByokBackend, MockBackend, Usage,
-    _scrub, create_backend, models_for,
+    DEFAULT_TIMEOUT_S, MODELS, BackendError, BudgetGuard, ByokBackend, MemoryLedger,
+    MockBackend, Usage, _scrub, create_backend, current_environment, models_for,
+    BedrockBackend,
 )
 
 from _harness import Harness  # noqa: E402
@@ -146,6 +147,126 @@ def test_budget_guard_is_checked_before() -> None:
     g2 = BudgetGuard(daily_usd=0.05, per_run_usd=10.0, single_call_usd=1.0)
     g2.record(Usage(model="claude-sonnet-5", input_tokens=14_200, output_tokens=1_000))
     check("the daily cap trips independently", "daily budget" in _try(lambda: g2.check(0.02)))
+
+
+def test_daily_spend_survives_a_new_guard() -> None:
+    """The bug this guards against: `spent_day` used to be a field on the guard.
+
+    In a CLI one guard lives for one run, so a per-object counter and a daily
+    total are the same number. In a web service a new guard is built per
+    request, so that counter resets on every call -- a cap that reads as $2/day
+    and enforces nothing. Spend has to be read from somewhere that outlives the
+    object, so that is what this asserts.
+    """
+    ledger = MemoryLedger()
+    first = BudgetGuard(daily_usd=0.10, per_run_usd=10.0, single_call_usd=1.0,
+                        ledger=ledger)
+    first.record(Usage(model="claude-haiku-4-5", input_tokens=90_000, output_tokens=0))
+    check("the first guard sees its own spend", round(first.spent_day, 4) == 0.09)
+
+    second = BudgetGuard(daily_usd=0.10, per_run_usd=10.0, single_call_usd=1.0,
+                         ledger=ledger)
+    check("a brand new guard sees it too", round(second.spent_day, 4) == 0.09)
+    check("  and the daily cap holds across the two",
+          "daily budget" in _try(lambda: second.check(0.02)))
+
+    fresh = BudgetGuard(daily_usd=0.10, per_run_usd=10.0, single_call_usd=1.0)
+    check("a guard with its own ledger starts clean", fresh.spent_day == 0.0)
+
+
+def test_lifetime_cap_and_kill_switch() -> None:
+    ledger = MemoryLedger()
+    g = BudgetGuard(daily_usd=100.0, per_run_usd=100.0, single_call_usd=1.0,
+                    total_usd=0.05, ledger=ledger)
+    g.record(Usage(model="claude-haiku-4-5", input_tokens=90_000, output_tokens=0))
+    check("the lifetime cap trips on cumulative spend",
+          "lifetime cap" in _try(lambda: g.check(0.001)))
+
+    unlimited = BudgetGuard(daily_usd=100.0, per_run_usd=100.0, single_call_usd=1.0,
+                            ledger=ledger)
+    unlimited.check(0.001)
+    check("no lifetime cap set means no lifetime cap enforced", True)
+
+    off = BudgetGuard(enabled=False)
+    msg = _try(lambda: off.check(0.0))
+    check("the kill switch refuses even a free call", "kill switch" in msg)
+    check("  and it is checked first, before any cap arithmetic",
+          "budget" not in msg and "cap is" not in msg)
+
+
+def test_environment_is_derived_not_assumed() -> None:
+    """A hardcoded environment="local" meant the byok guard could never fire."""
+    markers = ("EAGLE_EYES_ENV", "RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID",
+               "PORT", "DYNO", "KUBERNETES_SERVICE_HOST", "WEBSITE_INSTANCE_ID")
+    saved = {k: os.environ.pop(k, None) for k in markers}
+    try:
+        check("a bare shell is local", current_environment() == "local")
+
+        for marker in ("RAILWAY_ENVIRONMENT", "PORT", "KUBERNETES_SERVICE_HOST"):
+            os.environ[marker] = "1"
+            check(f"{marker} means production", current_environment() == "production")
+            del os.environ[marker]
+
+        os.environ["EAGLE_EYES_ENV"] = "Client"
+        os.environ["RAILWAY_ENVIRONMENT"] = "production"
+        check("an explicit setting wins and is normalised",
+              current_environment() == "client")
+        del os.environ["EAGLE_EYES_ENV"]
+
+        check("byok is refused on a deployed host with no approver",
+              "refused" in _try(lambda: create_backend({"backend": "byok"})))
+        check("  and named approval still gets through the guard",
+              "refused" not in _try(
+                  lambda: create_backend({"backend": "byok",
+                                          "byok_approved_by": "a.tan, security"})))
+    finally:
+        for k in markers:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
+def test_calls_carry_a_timeout() -> None:
+    """Without one, a hung provider holds a worker until something else gives up.
+
+    The timeout has to reach the SDK, not just sit in a dataclass field, so this
+    drives `_invoke` with a stand-in client and reads back what it was handed.
+    """
+    from eagle_eyes.model_gateway import _invoke
+
+    seen: dict = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            class Block:
+                type, text = "text", '{"root_cause": "x"}'
+
+            class Resp:
+                content = [Block()]
+                usage = type("U", (), {"input_tokens": 10, "output_tokens": 2})()
+            return Resp()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+        def with_options(self, **kw):
+            seen.update(kw)
+            return self
+
+    check("there is a default", DEFAULT_TIMEOUT_S > 0)
+
+    _invoke(FakeClient(), "byok", "claude-haiku-4-5", "sys",
+            [{"type": "text", "text": "log"}], 100)
+    check("the default reaches the SDK", seen.get("timeout") == DEFAULT_TIMEOUT_S)
+
+    seen.clear()
+    _invoke(FakeClient(), "byok", "claude-haiku-4-5", "sys",
+            [{"type": "text", "text": "log"}], 100, timeout=7.5)
+    check("an explicit timeout reaches the SDK", seen.get("timeout") == 7.5)
+
+    check("config carries timeout_s onto a real backend",
+          "timeout" in BedrockBackend.__init__.__code__.co_varnames
+          and "timeout" in ByokBackend.__init__.__code__.co_varnames)
 
 
 def test_mock_is_usable_without_anything() -> None:

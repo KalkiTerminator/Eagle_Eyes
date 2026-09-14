@@ -129,8 +129,12 @@ names, visible element tree) via the RPA tool's own accessibility APIs and send 
 
 ### 3.2 Recommendation
 
-**Ship in Mode 0 (Option A). Build the pipeline so Modes 1–3 are a config change. Pursue Mode 1 as
-the first escalation, and pursue it as Option C′ — narrowing inside iBot — rather than Option C.**
+**Ship in Mode 0 (Option A). Build the pipeline so Modes 1–3 are a config change *once the code
+behind them exists*. Pursue Mode 1 as the first escalation, and pursue it as Option C′ — narrowing
+inside iBot — rather than Option C.**
+
+A config change is the right *shape* for the escalation; it is not a substitute for the work. §3.3
+records what happened when the config got there first.
 
 Reasoning:
 
@@ -170,11 +174,19 @@ security control, and it is not what I want to be saying after an incident.
 ### 3.3 Mode mechanics
 
 ```
-Mode 0  referenced in place, never copied, never sent    default; no sign-off needed
-Mode 1  read → crop → derivative sent to model           security sign-off
-Mode 2  read → crop → OCR-redact → derivative sent       security sign-off
-Mode 3  read → sent to model as captured                 contract + DPA + named approver
+Mode 0  referenced in place, never copied, never sent    BUILT    default; no sign-off needed
+Mode 1  read → crop → derivative sent to model           DESIGNED security sign-off
+Mode 2  read → crop → OCR-redact → derivative sent       DESIGNED security sign-off
+Mode 3  read → sent to model as captured                 BUILT    contract + DPA + named approver
 ```
+
+**Only the modes marked BUILT are selectable.** Modes 1 and 2 were briefly accepted by the config
+and by `Engine`, and neither had a line of cropping or OCR behind it — selecting either one sent the
+screenshot exactly as captured while the operator believed it had been cropped and scrubbed. That is
+strictly worse than Mode 3, where the exposure is at least stated out loud, and it is the failure
+mode this document exists to prevent. `analysis.SCREENSHOT_MODES` is now `{0, 3}` and anything else
+raises; `--screenshot-mode` offers `0` and `3`. When the crop worker is written, the mode is added
+back to that set in the same change — never before it.
 
 **Mode 0 creates no copy of any screenshot.** The image is read only to record its path, size and
 dimensions; the file stays on the bot VM share under the ACLs the estate already applies, and the

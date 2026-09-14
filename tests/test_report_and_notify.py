@@ -14,7 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from eagle_eyes.notify import Notifier, compose  # noqa: E402
+from eagle_eyes.notify import MemorySuppression, Notifier, compose  # noqa: E402
+from eagle_eyes.storage import (  # noqa: E402
+    Database, FingerprintRepo, NotificationStateRepo, Principal,
+)
 from eagle_eyes.report import ReportInput, render, write, write_index  # noqa: E402
 
 from _harness import Harness  # noqa: E402
@@ -166,6 +169,109 @@ def test_different_developers_have_separate_caps() -> None:
         n.send(_n(to="b@x", fp=f"{i:064x}"), now=t)
     check("one developer's flood does not silence another",
           len([x for x in n.sent_log if x.to == "b@x"]) == 2)
+
+
+def test_suppression_survives_a_new_notifier() -> None:
+    """The bug: every window the suppression rules describe was process-scoped.
+
+    A Notifier built per request resets `sent`, `counts` and `per_hour` on every
+    call, so "already notified in the last 24 hours" and "ten an hour" enforce
+    nothing at all -- and the field names read as if they do. A durable store
+    means a second Notifier, a second worker or a restart sees the same history.
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        db = Database(d / "n.db")
+        p = Principal.local()
+        FingerprintRepo(db, p).touch("a" * 64, 1, "NullReferenceException",
+                                     "object reference not set", "Bot.cs:42")
+        store = NotificationStateRepo(db, p)
+        t = datetime(2026, 9, 11, 9, 0, 0)
+
+        first = Notifier(per_developer_hourly_cap=10, store=store)
+        d1 = first.send(_n(fp="a" * 64), now=t)
+        check("the first send goes out", d1.send)
+
+        second = Notifier(per_developer_hourly_cap=10, store=store)
+        d2 = second.send(_n(fp="a" * 64), now=t + timedelta(minutes=5))
+        check("a brand new Notifier still sees it as already sent", not d2.send)
+        check("  and counts the repeat rather than resending",
+              "seen 2 times" in d2.reason, d2.reason)
+
+        third = Notifier(per_developer_hourly_cap=10, store=store)
+        d3 = third.send(_n(fp="a" * 64), now=t + timedelta(minutes=6))
+        check("the repeat count keeps climbing across notifiers",
+              "seen 3 times" in d3.reason, d3.reason)
+
+        after = Notifier(per_developer_hourly_cap=10, store=store)
+        d4 = after.send(_n(fp="a" * 64), now=t + timedelta(hours=25))
+        check("and the window really does expire", d4.send)
+
+        check("a memory store is honest about not being durable",
+              MemorySuppression.durable is False)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_durable_hourly_cap_spans_notifiers() -> None:
+    d = Path(tempfile.mkdtemp())
+    try:
+        db = Database(d / "n.db")
+        p = Principal.local()
+        fps = FingerprintRepo(db, p)
+        for i in range(6):
+            fps.touch(f"{i:064x}", 1, "TimeoutException", "timed out", "Bot.cs:9")
+        store = NotificationStateRepo(db, p)
+        t = datetime(2026, 9, 11, 9, 0, 0)
+
+        sent = 0
+        for i in range(6):
+            # A fresh Notifier each time, exactly as a web request would build one.
+            n = Notifier(per_developer_hourly_cap=2, store=store)
+            if n.send(_n(fp=f"{i:064x}"), now=t + timedelta(seconds=i)).send:
+                sent += 1
+        check("the hourly cap holds across six separate notifiers", sent == 2, str(sent))
+
+        n = Notifier(per_developer_hourly_cap=2, store=store)
+        check("another developer is unaffected",
+              n.send(_n(to="other@x", fp=f"{0:064x}"), now=t).send)
+
+        n = Notifier(per_developer_hourly_cap=2, store=store)
+        check("and the cap frees up after the hour",
+              n.send(_n(fp=f"{5:064x}"), now=t + timedelta(hours=2)).send)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_durable_store_refuses_to_invent_history() -> None:
+    """Recording a send against a fingerprint that is not stored must not pass.
+
+    Silently dropping it would leave the recipient with no repeat window for
+    that failure -- suppression quietly not applying to exactly the failures
+    nobody wrote down.
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        db = Database(d / "n.db")
+        store = NotificationStateRepo(db, Principal.local())
+        raised = ""
+        try:
+            store.record_sent("dev@x", "b" * 64, datetime(2026, 9, 11, 9, 0, 0))
+        except LookupError as e:
+            raised = str(e)
+        check("an unknown fingerprint is refused, not swallowed",
+              "not in the database" in raised, raised)
+
+        n = Notifier(store=store)
+        denied = ""
+        try:
+            n.state
+        except AttributeError as e:
+            denied = str(e)
+        check("and a durable notifier will not hand back an empty dict",
+              "database" in denied, denied)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_digest_makes_suppression_visible() -> None:
