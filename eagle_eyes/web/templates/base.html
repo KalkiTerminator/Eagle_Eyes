@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Eagle Eyes{% endblock %}</title>
+<style>
+:root {
+  --ink: #14181d; --muted: #5d6772; --line: #e2e6ea; --bg: #fbfcfd;
+  --panel: #ffffff; --accent: #1f4d8f; --accent-soft: #eef3fa;
+  --warn: #8a5a00; --warn-soft: #fdf5e3; --bad: #96271f; --bad-soft: #fbeceb;
+  --good: #1d6b40; --good-soft: #eaf5ee;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+a { color: var(--accent); }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+header.top {
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 0 24px; position: sticky; top: 0; z-index: 10;
+}
+header.top .inner {
+  max-width: 1080px; margin: 0 auto; display: flex; align-items: center;
+  gap: 20px; min-height: 58px; flex-wrap: wrap;
+}
+.brand { font-weight: 700; letter-spacing: -0.02em; text-decoration: none; color: var(--ink); }
+.brand span { color: var(--accent); }
+header.top nav { display: flex; gap: 18px; margin-left: auto; align-items: center; }
+header.top nav a { text-decoration: none; color: var(--muted); font-size: 14px; }
+header.top nav a:hover { color: var(--ink); }
+
+main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 72px; }
+.narrow { max-width: 560px; }
+
+h1 { font-size: 30px; letter-spacing: -0.02em; margin: 0 0 12px; }
+h2 { font-size: 20px; letter-spacing: -0.01em; margin: 36px 0 12px; }
+h3 { font-size: 15px; margin: 24px 0 8px; }
+p { margin: 0 0 14px; }
+.lede { font-size: 17px; color: var(--muted); max-width: 62ch; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 20px 22px; margin-bottom: 18px;
+}
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+.stat .n { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
+.stat .k { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.stat .note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+tbody tr:hover { background: var(--accent-soft); }
+
+label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 5px; }
+input[type=text], input[type=email], input[type=password], select, textarea {
+  width: 100%; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 7px; font: inherit; background: #fff;
+}
+input[type=file] { width: 100%; font-size: 13px; padding: 8px 0; }
+textarea { min-height: 110px; }
+button, .btn {
+  display: inline-block; background: var(--accent); color: #fff; border: 0;
+  padding: 9px 18px; border-radius: 7px; font: inherit; font-weight: 600;
+  cursor: pointer; text-decoration: none;
+}
+button.ghost, .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button.small { padding: 5px 11px; font-size: 13px; }
+
+.note, .warn, .bad, .good {
+  border-radius: 8px; padding: 12px 14px; margin: 14px 0; font-size: 14px;
+  border: 1px solid var(--line); background: var(--accent-soft);
+}
+.warn { background: var(--warn-soft); border-color: #eedfb4; color: var(--warn); }
+.bad { background: var(--bad-soft); border-color: #f0cdca; color: var(--bad); }
+.good { background: var(--good-soft); border-color: #c8e4d3; color: var(--good); }
+
+.pill {
+  display: inline-block; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; padding: 2px 8px; border-radius: 20px;
+  border: 1px solid var(--line); color: var(--muted); background: #fff;
+}
+.pill.ok { color: var(--good); border-color: #c8e4d3; background: var(--good-soft); }
+.pill.no { color: var(--bad); border-color: #f0cdca; background: var(--bad-soft); }
+.pill.wait { color: var(--warn); border-color: #eedfb4; background: var(--warn-soft); }
+
+footer.bot {
+  border-top: 1px solid var(--line); margin-top: 48px; padding: 20px 24px;
+  color: var(--muted); font-size: 13px;
+}
+footer.bot .inner { max-width: 1080px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header class="top"><div class="inner">
+  <a class="brand" href="/">Eagle <span>Eyes</span></a>
+  <nav>
+    {% if account %}
+      <a href="/app">Home</a>
+      <a href="/submit">Analyse a failure</a>
+      {% if account.role == 'admin' %}<a href="/admin">Admin</a>{% endif %}
+      <span class="pill">{{ account.email }} &middot; {{ account.role }}</span>
+      <form method="post" action="/logout" style="display:inline">
+        <button class="ghost small" type="submit">Sign out</button>
+      </form>
+    {% else %}
+      <a href="/#how">How it works</a>
+      <a href="/login">Sign in</a>
+      <a class="btn small" href="/register">Request access</a>
+    {% endif %}
+  </nav>
+</div></header>
+
+<main class="{% block mainclass %}{% endblock %}">
+{% if warning %}<div class="bad"><b>Storage warning.</b> {{ warning }}</div>{% endif %}
+{% if kill_switch %}<div class="warn"><b>Model calls are switched off.</b>
+  The kill switch is set, so nothing will be sent to a model and nothing can be
+  charged. Submissions will be refused until it is cleared.</div>{% endif %}
+{% block body %}{% endblock %}
+</main>
+
+<footer class="bot"><div class="inner">
+  Eagle Eyes &middot; backend <b>{{ backend }}</b> &middot; environment <b>{{ environment }}</b><br>
+  This instance runs on synthetic data only. Real client logs, screenshots and
+  source never leave the estate they were captured in.
+</div></footer>
+</body>
+</html>

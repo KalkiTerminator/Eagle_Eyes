@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Home — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>Failures</h1>
+<p class="lede">
+  Everything below is scoped to what you are allowed to see — as a
+  <b>{{ account.role }}</b>{% if account.scope %}, covering
+  {{ account.scope|join(', ') }}{% endif %}. The counts are computed over the
+  same rows, so they do not tell you how large the parts you cannot see are.
+</p>
+
+<div class="grid" style="margin:22px 0 26px">
+  <div class="stat">
+    <div class="k">Failures</div><div class="n">{{ stats.failures }}</div>
+    <div class="note">Visible to you.</div>
+  </div>
+  <div class="stat">
+    <div class="k">Distinct fingerprints</div><div class="n">{{ stats.fingerprints }}</div>
+    <div class="note">How many genuinely different problems those failures are.</div>
+  </div>
+  <div class="stat">
+    <div class="k">Answered from the store</div><div class="n">{{ stats.dedup_rate|pct }}</div>
+    <div class="note">Repeats answered without calling a model. The whole cost argument.</div>
+  </div>
+  <div class="stat">
+    <div class="k">Spent</div><div class="n">{{ stats.spend_usd|money }}</div>
+    <div class="note">Real provider spend on the analyses you can see.</div>
+  </div>
+</div>
+
+{% if jobs %}
+<div class="panel">
+  <h3 style="margin-top:0">Your recent submissions</h3>
+  <table>
+    <tr><th>Status</th><th>Result</th></tr>
+    {% for j in jobs %}
+    <tr>
+      <td>
+        {% if j.status == 'done' %}<span class="pill ok">done</span>
+        {% elif j.status == 'failed' %}<span class="pill no">failed</span>
+        {% else %}<span class="pill wait">{{ j.status }}</span>{% endif %}
+      </td>
+      <td>
+        {% if j.status == 'done' and j.result %}
+          <a href="/failures/{{ j.result.failure_id }}">View the diagnosis</a>
+        {% elif j.status == 'failed' %}<span class="muted">{{ j.error }}</span>
+        {% else %}<a href="/jobs/{{ j.id }}">Watch it run</a>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h3 style="margin-top:0">Recent failures</h3>
+  {% if failures %}
+  <table>
+    <tr><th>When</th><th>Bot</th><th>Root cause</th><th>Confidence</th><th>Path</th></tr>
+    {% for f in failures %}
+    <tr>
+      <td class="mono small">{{ f['occurred_at'] }}</td>
+      <td class="small">{{ f['service_line'] }}/{{ f['bot_number'] }}</td>
+      <td><a href="/failures/{{ f['id'] }}">{{ (f['root_cause'] or 'Not analysed')|truncate(90) }}</a></td>
+      <td>
+        {% set c = f['confidence'] or 0 %}
+        {% if c >= 0.7 %}<span class="pill ok">{{ '%.2f'|format(c) }}</span>
+        {% elif c >= 0.3 %}<span class="pill wait">{{ '%.2f'|format(c) }}</span>
+        {% else %}<span class="pill no">{{ '%.2f'|format(c) }}</span>{% endif %}
+      </td>
+      <td class="small muted">{{ f['path'] or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">
+    Nothing is visible to you yet. As a <b>{{ account.role }}</b> that is the
+    correct answer rather than an empty database —
+    {% if account.role == 'user' %}you see failures on bots you own{% elif account.role == 'manager' %}you see the service lines in your scope{% else %}you see everything{% endif %}.
+  </p>
+  {% endif %}
+  <p style="margin:16px 0 0"><a class="btn" href="/submit">Analyse a failure</a></p>
+</div>
+
+{% endblock %}

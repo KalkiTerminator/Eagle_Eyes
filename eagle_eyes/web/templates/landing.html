@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Eagle Eyes — root cause for RPA failures{% endblock %}
+{% block body %}
+
+<h1>An RPA bot failed at 3am. Eagle Eyes says why.</h1>
+<p class="lede">
+  A failure leaves three things behind on the machine that ran it: an execution
+  log, a screenshot of whatever was on screen, and the source of the bot itself.
+  A developer opens all three, reads across them, and works out what happened.
+  Eagle Eyes does that correlation and hands back a root cause, a suggested fix,
+  and an honest confidence in both.
+</p>
+
+<div class="grid" style="margin:28px 0 8px">
+  <div class="stat"><div class="k">The input</div>
+    <div class="n">3</div>
+    <div class="note">Log, screenshot and source, read together. Any one of them alone is a guess.</div></div>
+  <div class="stat"><div class="k">Repeat failures</div>
+    <div class="n">~95%</div>
+    <div class="note">Deduplicated before a model is called at all — measured over 251 synthetic failures.</div></div>
+  <div class="stat"><div class="k">Cost of a repeat</div>
+    <div class="n">$0.00</div>
+    <div class="note">A failure already diagnosed is answered from the store, not the provider.</div></div>
+</div>
+
+<h2 id="how">How it works</h2>
+
+<div class="panel">
+  <h3>1 &middot; Correlate, don't summarise</h3>
+  <p class="muted">
+    A log says <code>ElementClickInterceptedException</code>. The screenshot shows
+    a session-timeout banner covering the button. The source shows a click with
+    no wait and no retry. None of those three is the answer; together they are.
+    Each input is sanitized before it goes anywhere — credentials, tokens,
+    account numbers and personal data are removed first, and the sanitizer is
+    tested against a corpus seeded with exactly those.
+  </p>
+</div>
+
+<div class="panel">
+  <h3>2 &middot; Deduplicate, because failures repeat</h3>
+  <p class="muted">
+    Failures are fingerprinted on what actually distinguishes them — the
+    innermost exception in a <code>---&gt;</code> chain, the top stack frames,
+    the message with timeouts, session ids, versions and addresses normalised
+    out. When a spike produces two hundred failures, it produces one
+    fingerprint, and one analysis answers all of them.
+  </p>
+  <p class="muted small">
+    This is not a detail. Before the Selenium version trailer was normalised
+    out, a Chrome auto-update silently fragmented every fingerprint and tripled
+    the bill with nothing in the logs to show for it.
+  </p>
+</div>
+
+<div class="panel">
+  <h3>3 &middot; Refuse to guess</h3>
+  <p class="muted">
+    Two screenshots sit within seconds of the failure: it attaches neither and
+    says why. The source was edited after the failure: confidence is capped and
+    the report says the code may not be what ran. The model returns something
+    unparseable: the report says the analysis did not complete, at zero
+    confidence. A diagnosis that sounds right and is not is worse than no
+    diagnosis, because someone acts on it.
+  </p>
+</div>
+
+<div class="panel">
+  <h3>4 &middot; Access is enforced where the data is</h3>
+  <p class="muted">
+    Registration grants nothing: a new account can sign in and see nothing until
+    an administrator approves it with a role. An administrator sees everything,
+    a manager sees the service lines in their scope, and a developer sees
+    failures on the bots they own — enforced in the query that selects the rows,
+    not in a check on a route somebody can forget to add to the next page.
+  </p>
+</div>
+
+<h2>What this instance is</h2>
+<div class="note">
+  <p style="margin:0 0 8px"><b>A demonstration, on synthetic data, making real model calls.</b></p>
+  <p style="margin:0" class="small">
+    The bots, logs, screenshots and source here are fabricated. The analysis is
+    not simulated — it is the same engine, the same prompts and the same
+    provider a deployment would use. The product's security argument is that
+    client data never leaves the estate that captured it, which is exactly why
+    there is none of it here. What a real deployment must change before it sees
+    real data is written down separately, in
+    <span class="mono">docs/PRODUCTION_MIGRATION.md</span>.
+  </p>
+</div>
+
+<p style="margin-top:28px">
+  <a class="btn" href="/register">Request access</a>
+  <a class="btn ghost" href="/login" style="margin-left:8px">Sign in</a>
+</p>
+
+{% endblock %}

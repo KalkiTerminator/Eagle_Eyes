@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Analyse a failure — Eagle Eyes{% endblock %}
+{% block body %}
+<h1>Analyse a failure</h1>
+<p class="lede">
+  Submit the log, and the source and screenshot if you have them. The log is the
+  only one that cannot be substituted for.
+</p>
+
+{% if error %}<div class="bad">{{ error }}</div>{% endif %}
+
+<div class="warn">
+  <b>An upload is a weaker input than a scanned failure, and the report will say so.</b>
+  There is no sibling directory to check the screenshot against, so it is
+  recorded as <span class="mono">uploaded</span> rather than as a verified
+  pairing. There is no modification time on pasted source, so the reuse gate
+  cannot tell whether the code changed — and therefore refuses to reuse an
+  earlier answer rather than risk serving a fix for code that no longer exists.
+</div>
+
+<form method="post" action="/submit" enctype="multipart/form-data" class="panel">
+  <div class="grid">
+    <div>
+      <label for="service_line">Service line</label>
+      <input id="service_line" name="service_line" type="text" required
+             placeholder="FINANCE_AP">
+    </div>
+    <div>
+      <label for="bot_number">Bot</label>
+      <input id="bot_number" name="bot_number" type="text" required
+             placeholder="BOT001">
+    </div>
+  </div>
+
+  <label for="log">Execution log <span class="muted">(required)</span></label>
+  <input id="log" name="log" type="file" accept=".log,.txt,text/plain" required>
+
+  <label for="code">Bot source <span class="muted">(optional)</span></label>
+  <input id="code" name="code" type="file" accept=".txt,.cs,.js,.py,text/plain">
+  <p class="muted small" style="margin-top:4px">
+    Without it the diagnosis rests on the log alone: it can name what failed, but
+    it cannot point at the line.
+  </p>
+
+  <label for="screenshot">Error screenshot <span class="muted">(optional)</span></label>
+  <input id="screenshot" name="screenshot" type="file" accept="image/*">
+  <p class="muted small" style="margin-top:4px">
+    Only sent to a model if the screenshot policy permits it and triage asks for
+    it. The type is checked from the file's own leading bytes, not its name.
+  </p>
+
+  <p style="margin:22px 0 0"><button type="submit">Analyse</button></p>
+</form>
+{% endblock %}

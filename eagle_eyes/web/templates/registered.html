@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Request received — Eagle Eyes{% endblock %}
+{% block mainclass %}narrow{% endblock %}
+{% block body %}
+<h1>Request received</h1>
+<div class="good">
+  Your account exists and is in the <b>requested</b> state. You can sign in now;
+  until an administrator approves you there is nothing to see.
+</div>
+<p><a class="btn" href="/login">Sign in</a></p>
+{% endblock %}

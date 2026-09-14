@@ -12,6 +12,14 @@ dependencies = []
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]          # real analysis via a direct key
 bedrock = ["anthropic[bedrock]>=0.40"]   # real analysis via AWS Bedrock
+# The hosted web product. Four dependencies, none of which the CLI or the test
+# suite touches -- `eagle_eyes.web` is the only package that imports them.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
 
 [project.scripts]
 eagle-eyes = "eagle_eyes.__main__:main"
@@ -21,7 +29,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["eagle_eyes"]
+packages = ["eagle_eyes", "eagle_eyes.web"]
 
 [tool.setuptools.package-data]
 eagle_eyes = ["schema.sql", "prompts/*.txt", "prompts/*.json"]
+"eagle_eyes.web" = ["templates/*.html", "static/*"]

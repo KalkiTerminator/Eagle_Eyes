@@ -82,16 +82,45 @@ class FailureCandidate:
         return "+".join(bits)
 
 
-def read_text(path: Path) -> str:
-    """Read with universal newlines, tolerating whatever encoding Windows used."""
-    for enc in ("utf-8-sig", "utf-8", "utf-16", "cp1252"):
+def decode_text(raw: bytes) -> str:
+    """Decode whatever encoding Windows used, normalising line endings.
+
+    The encoding list is not decoration: iBot logs come off Windows hosts as
+    utf-8 with a BOM, as utf-16 when something used a .NET default, and as
+    cp1252 when an application wrote bytes it called text. Guessing wrong turns
+    a stack trace into mojibake and the fingerprint into noise.
+
+    Universal newlines matter for the same reason: CRLF riding into the hash
+    made one failure fingerprint differently on Windows and Linux, which is a
+    dedup rate silently cut in half.
+    """
+    # utf-16 is tried ONLY behind a byte-order mark. Without one, any cp1252
+    # log with an even number of bytes decodes "successfully" as utf-16 into
+    # CJK gibberish -- b"caf\xe9\r\n" comes back as three unrelated
+    # characters. No exception, no warning, and the fingerprint downstream is
+    # computed over nonsense. A BOM is the only honest signal that a file is
+    # utf-16, so that is what gates it.
+    encodings = ["utf-8-sig", "utf-8"]
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        encodings.insert(0, "utf-16")
+    encodings.append("cp1252")
+
+    for enc in encodings:
         try:
-            with open(path, "r", encoding=enc, newline=None) as fh:
-                return fh.read()
+            text = raw.decode(enc)
         except (UnicodeDecodeError, UnicodeError):
             continue
-    with open(path, "r", encoding="utf-8", errors="replace", newline=None) as fh:
-        return fh.read()
+        return _newlines(text)
+    return _newlines(raw.decode("utf-8", errors="replace"))
+
+
+def _newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_text(path: Path) -> str:
+    """Read a file with decode_text's encoding handling."""
+    return decode_text(Path(path).read_bytes())
 
 
 def parse_location(log_path: Path, share_root: Path) -> TreeLocation | None:

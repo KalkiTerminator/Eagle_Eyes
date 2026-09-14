@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def now() -> str:
@@ -181,18 +182,106 @@ CREATE INDEX idx_screenshot_derivative_expiry ON screenshot (expires_at)
     WHERE derivative_path IS NOT NULL AND deleted_at IS NULL;
 """
 
-MIGRATIONS: dict[int, str] = {2: MIGRATION_2}
+MIGRATION_3 = """
+-- Allow pairing_method = 'uploaded'. SQLite cannot alter a CHECK constraint, so
+-- the table is rebuilt. Nothing is rewritten: existing rows came from the
+-- scanner and their method is still accurate.
+CREATE TABLE failure_new (
+    id                   INTEGER PRIMARY KEY,
+    bot_id               INTEGER NOT NULL REFERENCES bot(id),
+    fingerprint_id       INTEGER NOT NULL REFERENCES fingerprint(id),
+    analysis_id          INTEGER REFERENCES analysis(id),
+    occurred_at          TEXT NOT NULL,
+    ingested_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    status               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','deduped','analyzing','analyzed','failed','suppressed')),
+    was_deduped          INTEGER NOT NULL DEFAULT 0 CHECK (was_deduped IN (0,1)),
+
+    -- provenance: exactly where each input came from
+    log_path             TEXT NOT NULL,     -- UNC path on the VM share
+    screenshot_path      TEXT,              -- UNC path; NOT copied in Mode 0
+    code_path            TEXT,
+    code_mtime           TEXT,
+    code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
+    -- 'log_path' is the normal case: the log names the screenshot file (ARCHITECTURE 4.4).
+    -- 'timestamp' is the fallback when no capture line exists; 'none' means we refused to guess.
+    -- 'uploaded' means a person submitted the image alongside the log through the
+    -- web UI. There is no sibling directory and no capture line to check it
+    -- against, so it is whatever they attached -- recorded as its own method
+    -- rather than borrowed from 'log_path', which would claim the log named it.
+    pairing_method       TEXT CHECK (pairing_method IN
+                             ('log_path','timestamp','none','uploaded')),
+
+    log_sanitized        TEXT,              -- nulled at 90 days
+    code_snapshot        TEXT,              -- nulled at 90 days
+    severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
+    correlation_id       TEXT NOT NULL,
+    content_expires_at   TEXT NOT NULL,
+    expires_at           TEXT NOT NULL
+);
+
+INSERT INTO failure_new SELECT * FROM failure;
+DROP TABLE failure;
+ALTER TABLE failure_new RENAME TO failure;
+
+-- The scanner is restartable and re-reads folders; this makes a re-scan a no-op.
+CREATE UNIQUE INDEX idx_failure_idempotency ON failure (log_path);
+CREATE INDEX idx_failure_bot_time     ON failure (bot_id, occurred_at DESC);
+CREATE INDEX idx_failure_fingerprint  ON failure (fingerprint_id, occurred_at DESC);
+CREATE INDEX idx_failure_pending      ON failure (status) WHERE status IN ('pending','analyzing');
+CREATE INDEX idx_failure_feed         ON failure (occurred_at DESC);
+CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
+    WHERE log_sanitized IS NOT NULL;
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3}
+
+
+# How long a writer waits for another writer before giving up. SQLite allows
+# one writer at a time; without a busy timeout the second one raises "database
+# is locked" immediately, which under a web server means a request fails for no
+# reason a user could understand.
+BUSY_TIMEOUT_MS = 5000
 
 
 class Database:
+    """One SQLite file, one connection PER THREAD.
+
+    A single shared connection is correct for a CLI and raises ProgrammingError
+    the first time a web server handles two requests at once -- sqlite3 refuses
+    to use a connection from a thread other than the one that created it, and
+    that refusal is the good outcome. The bad one is `check_same_thread=False`,
+    which makes the error go away and leaves several threads interleaving
+    statements on one connection and one transaction.
+
+    So each thread opens its own. WAL mode allows many readers alongside one
+    writer, and BUSY_TIMEOUT_MS makes a second writer wait its turn instead of
+    failing. The API is unchanged: `db.conn` is still the connection, it is just
+    the right one for whoever is asking.
+    """
+
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path), isolation_level=None)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
+        self._local = threading.local()
+        self._all: list[sqlite3.Connection] = []
+        self._lock = threading.Lock()
         self.migrate()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        existing = getattr(self._local, "conn", None)
+        if existing is not None:
+            return existing
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        self._local.conn = conn
+        with self._lock:
+            self._all.append(conn)
+        return conn
 
     def migrate(self) -> None:
         """Create or upgrade. Idempotent, so it is safe on every start."""
@@ -213,9 +302,32 @@ class Database:
                     f"{self.path} is at schema {current} and this build wants "
                     f"{SCHEMA_VERSION}, but no migration to {current + 1} exists. "
                     "Refusing to run against a schema nobody described.")
-            self.conn.executescript(step)
+            self._run_migration(step, current + 1)
             current += 1
             self.conn.execute(f"PRAGMA user_version = {current}")
+
+    def _run_migration(self, script: str, to_version: int) -> None:
+        """Apply one migration with foreign keys off, then prove they still hold.
+
+        SQLite cannot alter a CHECK constraint, so those migrations rebuild the
+        table -- and a DROP TABLE with foreign keys ON cascades. Dropping
+        `failure` to rebuild it silently deleted every `screenshot` row, because
+        the child has ON DELETE CASCADE. This is SQLite's own documented
+        procedure for the rebuild (its ALTER TABLE page, the twelve steps):
+        disable enforcement, rebuild, re-enable, and then run foreign_key_check
+        so a migration that really did orphan something fails loudly instead of
+        leaving a quietly broken database behind.
+        """
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.executescript(script)
+            broken = self.conn.execute("PRAGMA foreign_key_check").fetchall()
+            if broken:
+                raise RuntimeError(
+                    f"migration to schema {to_version} left {len(broken)} broken "
+                    f"foreign key reference(s): {broken[:3]}")
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -228,7 +340,15 @@ class Database:
         self.conn.execute("COMMIT")
 
     def close(self) -> None:
-        self.conn.close()
+        """Close every thread's connection, not just this thread's."""
+        with self._lock:
+            connections, self._all = self._all, []
+        for conn in connections:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        self._local = threading.local()
 
 
 # --------------------------------------------------------------------------

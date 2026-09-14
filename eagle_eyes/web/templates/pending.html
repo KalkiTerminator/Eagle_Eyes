@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Awaiting approval — Eagle Eyes{% endblock %}
+{% block mainclass %}narrow{% endblock %}
+{% block body %}
+<h1>Awaiting approval</h1>
+<div class="warn">
+  This account is <b>{{ account.status }}</b>. Signing in worked; being granted
+  access is a separate step, and an administrator has not taken it yet.
+</div>
+<p class="muted">
+  Nothing is visible from here and nothing can be submitted. The account cannot
+  produce an identity the data layer will accept, so this is not a hidden menu
+  — there is genuinely nothing behind it.
+</p>
+{% endblock %}

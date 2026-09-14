@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Administration — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>Administration</h1>
+
+{% if error %}<div class="bad">{{ error }}</div>{% endif %}
+
+<div class="grid" style="margin:20px 0 26px">
+  <div class="stat"><div class="k">Spent, last 24h</div>
+    <div class="n">{{ spend_day|money }}</div>
+    <div class="note">Read from committed analyses, not from a counter in this process.</div></div>
+  <div class="stat"><div class="k">Spent, lifetime</div>
+    <div class="n">{{ spend_total|money }}</div>
+    <div class="note">What the lifetime cap is checked against before every call.</div></div>
+  <div class="stat"><div class="k">Model calls</div>
+    <div class="n">{% if kill_switch %}off{% else %}on{% endif %}</div>
+    <div class="note">Flip EAGLE_EYES_DISABLE_MODEL to stop all spend without a redeploy.</div></div>
+</div>
+
+<h2>Accounts</h2>
+<div class="panel">
+  <table>
+    <tr><th>Email</th><th>Status</th><th>Role</th><th>Scope</th><th>Approve</th><th></th></tr>
+    {% for a in accounts %}
+    <tr>
+      <td>{{ a.email }}<div class="muted small">{{ a.display_name }}</div></td>
+      <td>
+        {% if a.status == 'approved' %}<span class="pill ok">approved</span>
+        {% elif a.status == 'requested' %}<span class="pill wait">requested</span>
+        {% else %}<span class="pill no">{{ a.status }}</span>{% endif %}
+      </td>
+      <td class="small">{{ a.role }}</td>
+      <td class="small muted">{{ a.scope|join(', ') or '—' }}</td>
+      <td>
+        <form method="post" action="/admin/approve">
+          <input type="hidden" name="account_id" value="{{ a.id }}">
+          <select name="role" style="width:auto">
+            <option value="user">user</option>
+            <option value="manager">manager</option>
+            <option value="admin">admin</option>
+          </select>
+          <select name="scope" multiple size="3" style="width:auto"
+                  title="Service lines — required for a manager, refused for anyone else">
+            {% for t in teams %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+          </select>
+          <button class="small" type="submit">Approve</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/admin/status">
+          <input type="hidden" name="account_id" value="{{ a.id }}">
+          <select name="status" style="width:auto">
+            <option value="suspended">suspend</option>
+            <option value="revoked">revoke</option>
+          </select>
+          <button class="ghost small" type="submit">Apply</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small" style="margin:14px 0 0">
+    A manager must be given at least one service line — approving one with an
+    empty scope is refused, because an empty filter list is the classic way a
+    restriction inverts into no restriction at all. A scope on a user or an
+    admin is refused for the opposite reason: nothing would enforce it, so
+    storing it would imply a limit that does not exist. Suspending or revoking
+    an account also revokes its live sessions, so it takes effect on the next
+    request rather than whenever a cookie happens to expire.
+  </p>
+</div>
+
+<h2>Audit</h2>
+<div class="panel">
+  <table>
+    <tr><th>When</th><th>Actor</th><th>Action</th><th>Resource</th><th>Outcome</th></tr>
+    {% for e in audit %}
+    <tr>
+      <td class="mono small">{{ e['occurred_at'] }}</td>
+      <td class="small">{{ e['actor'] }} <span class="muted">({{ e['actor_role'] }})</span></td>
+      <td class="small">{{ e['action'] }}</td>
+      <td class="small muted">{{ e['resource_type'] }}/{{ e['resource_id'] }}</td>
+      <td>{% if e['outcome'] == 'deny' %}<span class="pill no">deny</span>
+          {% else %}<span class="pill ok">allow</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small" style="margin:14px 0 0">
+    Append-only, enforced by a database trigger rather than by convention. A run
+    of denials from one actor is the signal worth watching.
+  </p>
+</div>
+
+{% endblock %}

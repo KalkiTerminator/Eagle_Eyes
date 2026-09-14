@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Analysing — Eagle Eyes{% endblock %}
+{% block mainclass %}narrow{% endblock %}
+{% block body %}
+<h1>Analysing</h1>
+<div id="panel" class="panel">
+  <p class="muted">
+    The model call runs on a worker rather than inside this request, so a slow
+    provider cannot hold the page open or leave you retrying a call that is
+    already being charged for.
+  </p>
+  <p><b id="status">{{ job.status }}</b></p>
+</div>
+<script>
+const id = {{ job.id|tojson }};
+async function poll() {
+  const r = await fetch(`/jobs/${id}/status`);
+  if (!r.ok) return;
+  const j = await r.json();
+  document.getElementById('status').textContent = j.status;
+  if (j.status === 'done' && j.result) {
+    location.href = `/failures/${j.result.failure_id}`;
+  } else if (j.status === 'failed') {
+    document.getElementById('panel').innerHTML =
+      '<div class="bad"><b>The analysis did not complete.</b> ' +
+      new Option(j.error).innerHTML + '</div>' +
+      '<p><a class="btn ghost" href="/submit">Try again</a></p>';
+  } else {
+    setTimeout(poll, 900);
+  }
+}
+poll();
+</script>
+{% endblock %}

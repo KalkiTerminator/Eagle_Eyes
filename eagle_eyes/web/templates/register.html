@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Request access — Eagle Eyes{% endblock %}
+{% block mainclass %}narrow{% endblock %}
+{% block body %}
+<h1>Request access</h1>
+<p class="muted">
+  This creates an account in the <b>requested</b> state. You will be able to
+  sign in immediately, and you will see nothing until an administrator approves
+  you and assigns a role. That separation is deliberate.
+</p>
+{% if error %}<div class="bad">{{ error }}</div>{% endif %}
+<form method="post" action="/register" class="panel">
+  <label for="display_name">Name</label>
+  <input id="display_name" name="display_name" type="text" autocomplete="name">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" required>
+  <p class="muted small" style="margin-top:6px">At least 12 characters.</p>
+  <p style="margin:20px 0 0"><button type="submit">Request access</button></p>
+</form>
+{% endblock %}

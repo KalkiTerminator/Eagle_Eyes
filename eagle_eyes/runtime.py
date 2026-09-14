@@ -70,6 +70,52 @@ def data_dir() -> Path:
     return (Path(base) if base else Path.home() / ".local" / "share") / APP_NAME.lower()
 
 
+def in_container() -> bool:
+    """Whether this process is running inside a container.
+
+    Checked so the data directory can warn rather than silently write to a
+    filesystem that disappears on the next deploy.
+    """
+    if os.environ.get("EAGLE_EYES_IN_CONTAINER", "").strip().lower() in (
+            "1", "true", "yes"):
+        return True
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in ("docker", "kubepods", "containerd"))
+
+
+def ephemeral_storage_warning() -> str | None:
+    """A warning when data would land somewhere a redeploy wipes, else None.
+
+    In a container `data_dir()` resolves to ~/.local/share/eagleeyes -- inside
+    the image layer, which is recreated on every deploy. Everything would work:
+    accounts could be created, failures analysed, money spent, and all of it
+    would vanish at the next push with no error anywhere. A volume mounted and
+    pointed at by EAGLE_EYES_DATA_DIR is the fix; saying so loudly is this
+    function's whole job.
+    """
+    if not in_container():
+        return None
+    configured = os.environ.get("EAGLE_EYES_DATA_DIR", "").strip()
+    if not configured:
+        return (f"Running in a container with no EAGLE_EYES_DATA_DIR set, so data "
+                f"goes to {data_dir()} -- inside the image layer, which is "
+                f"recreated on every deploy. Accounts, analyses and spend history "
+                f"will be silently lost. Attach a volume and point "
+                f"EAGLE_EYES_DATA_DIR at it.")
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        return (f"EAGLE_EYES_DATA_DIR is '{configured}', a relative path. It "
+                f"resolves against whatever the working directory happens to be, "
+                f"which in a container is not somewhere a volume is mounted. Use "
+                f"an absolute path.")
+    return None
+
+
 def config_dir() -> Path:
     if (env := os.environ.get("EAGLE_EYES_CONFIG_DIR")):
         return Path(env).expanduser()

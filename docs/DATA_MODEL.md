@@ -418,7 +418,12 @@ CREATE TABLE failure (
     code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
     -- 'log_path' is the normal case: the log names the screenshot file (ARCHITECTURE 4.4).
     -- 'timestamp' is the fallback when no capture line exists; 'none' means we refused to guess.
-    pairing_method       TEXT CHECK (pairing_method IN ('log_path','timestamp','none')),
+    -- 'uploaded' means a person submitted the image alongside the log through the
+    -- web UI. There is no sibling directory and no capture line to check it
+    -- against, so it is whatever they attached -- recorded as its own method
+    -- rather than borrowed from 'log_path', which would claim the log named it.
+    pairing_method       TEXT CHECK (pairing_method IN
+                             ('log_path','timestamp','none','uploaded')),
 
     log_sanitized        TEXT,              -- nulled at 90 days
     code_snapshot        TEXT,              -- nulled at 90 days

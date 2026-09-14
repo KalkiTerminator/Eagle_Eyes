@@ -52,6 +52,25 @@ def test_schema_matches_the_doc() -> None:
           blocks[0].strip() == in_file[ddl_start:].strip())
 
 
+def _v1_schema() -> str:
+    """schema.sql as version 1 actually looked.
+
+    Derived from the current file rather than pasted, so a new table added to
+    schema.sql without a migration makes the equivalence test fail loudly
+    instead of the two quietly describing different databases.
+    """
+    full = SCHEMA_PATH.read_text()
+    v1 = full.split("-- ---------- accounts ----------")[0]
+    v1 = v1.replace("CHECK (processing_mode IN (0, 3))",
+                    "CHECK (processing_mode BETWEEN 0 AND 3)")
+    v1 = v1.replace(
+        "pairing_method       TEXT CHECK (pairing_method IN\n"
+        "                             ('log_path','timestamp','none','uploaded')),",
+        "pairing_method       TEXT CHECK (pairing_method IN "
+        "('log_path','timestamp','none')),")
+    return v1
+
+
 def test_migration_lands_where_a_fresh_schema_does() -> None:
     """A migrated database must be indistinguishable from a freshly created one.
 
@@ -62,11 +81,8 @@ def test_migration_lands_where_a_fresh_schema_does() -> None:
     """
     d = Path(tempfile.mkdtemp())
     try:
-        full = SCHEMA_PATH.read_text()
-        v1 = full.split("-- ---------- accounts ----------")[0].replace(
-            "CHECK (processing_mode IN (0, 3))", "CHECK (processing_mode BETWEEN 0 AND 3)")
         con = sqlite3.connect(str(d / "old.db"))
-        con.executescript(v1)
+        con.executescript(_v1_schema())
         # A row recording a protection that was never applied -- mode 2 claimed
         # crop and OCR-redaction, and no such code ever existed.
         con.execute("INSERT INTO team(name) VALUES ('ops')")
@@ -112,6 +128,20 @@ def test_migration_lands_where_a_fresh_schema_does() -> None:
         ).fetchone()
         check("a mode 2 row is rewritten to what actually happened to it",
               tuple(row) == (3, 0, 0), str(tuple(row)))
+        kept = migrated.conn.execute(
+            "SELECT pairing_method FROM failure").fetchone()["pairing_method"]
+        check("and a row the scanner wrote is left alone", kept is None, str(kept))
+
+        # Rebuilding `failure` drops it, and `screenshot` cascades off it. With
+        # foreign keys enabled during a migration that silently deleted every
+        # screenshot row -- a data loss nothing would have reported.
+        n = migrated.conn.execute("SELECT COUNT(*) n FROM screenshot").fetchone()["n"]
+        check("rebuilding a parent table does not cascade its children away",
+              n == 1, str(n))
+        check("and no foreign key is left dangling",
+              migrated.conn.execute("PRAGMA foreign_key_check").fetchall() == [])
+        check("  with enforcement switched back on afterwards",
+              migrated.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1)
         refused = False
         try:
             migrated.conn.execute(

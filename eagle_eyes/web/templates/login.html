@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Eagle Eyes{% endblock %}
+{% block mainclass %}narrow{% endblock %}
+{% block body %}
+<h1>Sign in</h1>
+{% if error %}<div class="bad">{{ error }}</div>{% endif %}
+<form method="post" action="/login" class="panel">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <p style="margin:20px 0 0"><button type="submit">Sign in</button></p>
+</form>
+<p class="muted small">
+  No account? <a href="/register">Request access</a>. Registration creates an
+  account that can sign in and see nothing until an administrator approves it.
+</p>
+{% endblock %}
