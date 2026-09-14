@@ -6,10 +6,9 @@ and a user who retries -- which starts a second paid call for the same failure.
 
 Deliberately in-process and deliberately small. A real deployment would use a
 broker; this one is a single container and a queue that lives in it is honest
-about that. What it must NOT do is pretend to be durable: `docs/PRODUCTION_
-MIGRATION.md` records that a job in flight is lost on restart, because the
-alternative is a status page that says "running" forever for work nothing is
-doing.
+about that. What it must NOT do is pretend to be durable: a job in flight is
+lost on restart, and `docs/PRODUCTION_MIGRATION.md` §4.6 records that rather
+than leaving a status page saying "running" forever for work nothing is doing.
 
 Threads, not asyncio: the work is a blocking SDK call and a SQLite write, and
 running it on the event loop would block every other request on the worker.

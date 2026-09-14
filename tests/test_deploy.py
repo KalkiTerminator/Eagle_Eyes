@@ -263,5 +263,95 @@ def test_railway_config_is_consistent_with_the_app() -> None:
         check(f"{var} is documented", var in text)
 
 
+# -------------------------------------------------------- the migration guide
+
+def test_the_migration_guide_describes_this_codebase() -> None:
+    """A migration document that has drifted is worse than none.
+
+    Somebody deploys from it. The claims here are the ones that would send a
+    deployment the wrong way if they were stale -- which modes exist, which
+    profiles exist, what is deliberately absent -- so each is checked against
+    the code rather than believed.
+    """
+    doc_path = ROOT / "docs" / "PRODUCTION_MIGRATION.md"
+    check("the guide exists", doc_path.is_file())
+    if not doc_path.is_file():
+        return
+    raw = doc_path.read_text()
+    # Phrase checks run against a whitespace-collapsed copy. Markdown wraps at
+    # 100 columns, so "discards the\nargument being paid for" does not contain
+    # "discards the argument being paid for" -- and a cross-reference test that
+    # fails on where a line happens to break teaches people to delete it.
+    doc = " ".join(raw.split())
+
+    for other in ("SECURITY.md", "ARCHITECTURE.md", "DATA_MODEL.md"):
+        check(f"{other} is referenced and present",
+              other in doc and (ROOT / "docs" / other).is_file())
+
+    from eagle_eyes.analysis import SCREENSHOT_MODES
+    check("it says only modes 0 and 3 exist",
+          "`{0, 3}`" in doc and SCREENSHOT_MODES == {0, 3})
+    check("  and says not to re-admit one before it is built",
+          "Do not re-admit a mode until the code behind it is written" in doc)
+
+    fingerprint_src = (ROOT / "eagle_eyes" / "fingerprint.py").read_text()
+    check("it says only the dotnet profile exists",
+          'only `dotnet` exists' in doc)
+    profiles = set(re.findall(r'profile\s*==\s*"(\w+)"', fingerprint_src))
+    profiles |= set(re.findall(r'profile:\s*str\s*=\s*"(\w+)"', fingerprint_src))
+    check("  and the code agrees", profiles <= {"dotnet"}, str(profiles))
+
+    auth_src = (ROOT / "eagle_eyes" / "web" / "auth.py").read_text()
+    check("it says an admin cannot set another account's password",
+          "cannot** set another account's password" in doc)
+    check("  and the code refuses it",
+          "a password can only be changed by its owner" in auth_src)
+
+    jobs_src = (ROOT / "eagle_eyes" / "web" / "jobs.py").read_text()
+    check("it says the job queue is in-process and loses work on restart",
+          "in-process queue" in doc)
+    check("  which is what the module says about itself",
+          "pretend to be durable" in jobs_src)
+    check("  and the module points back at the section that records it",
+          "docs/PRODUCTION_MIGRATION.md" in jobs_src)
+
+    from eagle_eyes.web.seed import SEED_VAR
+    check("it says to unset the seed variable in production",
+          f"`{SEED_VAR}` unset" in doc, SEED_VAR)
+
+    check("it names the questions that block real data",
+          all(q in doc for q in ("Q1", "Q2", "Q5", "Q8")))
+    security = (ROOT / "docs" / "SECURITY.md").read_text()
+    for q in ("Q1", "Q2", "Q5", "Q8", "Q9", "Q12", "Q13", "Q14", "Q17"):
+        check(f"  {q} is a real question in SECURITY.md",
+              re.search(rf"\b{q}\b", security) is not None)
+    check("and adds the one hosting creates", "Q28" in doc)
+    check("  in SECURITY.md too, where the security team reads them",
+          "Q28" in security)
+    check("  marked blocking", re.search(r"\*\*Q28 \[BLOCKING[^\]]*\]\*\*", security)
+          is not None)
+    check("  and scoped to a hosted deployment, not to the CLI",
+          "Q28 gates a" in security or "hosted deployment only" in security)
+
+    # The check that would have caught this: the guide first numbered its new
+    # question Q24, which SECURITY.md already uses for "has the client agreed to
+    # this specific third-party recipient, by name, in writing?". Two documents
+    # disagreeing about what a question number means wastes a security review,
+    # and it is the kind of error a reader trusts rather than catches.
+    definitions = re.findall(r"^-\s+(?:\*\*)?(Q\d+)\b", security, re.M)
+    duplicates = sorted({q for q in definitions if definitions.count(q) > 1})
+    check("no question number is defined twice in SECURITY.md",
+          not duplicates, str(duplicates))
+    for cited in sorted(set(re.findall(r"\bQ\d+\b", raw))):
+        check(f"  {cited}, cited by the guide, is defined there exactly once",
+              definitions.count(cited) == 1,
+              f"defined {definitions.count(cited)} times")
+
+    check("it states plainly where this may not run",
+          "synthetic data only" in doc.lower())
+    check("  and that the tenancy argument is the reason",
+          "discards the argument being paid for" in doc)
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

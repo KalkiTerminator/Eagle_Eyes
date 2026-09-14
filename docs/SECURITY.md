@@ -399,6 +399,7 @@ Take these as a list. Blocking ones are marked.
 - Q9 Which region must processing occur in? Any data-residency constraint?
 - Q10 Is an analysis derived from client data itself client data, for retention and access purposes?
 - Q11 Does the client need to be told, and by whom?
+- **Q28 [BLOCKING for a hosted deployment]** Is an internet- or intranet-reachable service holding client-derived analyses acceptable at all, and under whose authorisation? *The CLI never had to ask. It read a share the operator could already reach, so it added a view rather than reach, and the blast radius of a bug was bounded by file permissions somebody else had already set. A hosted service is a new place client-derived content lives and a new way to get at it, and nothing behind it bounds a mistake in our own access control. See docs/PRODUCTION_MIGRATION.md sections 1.3 and 2.*
 
 **Operations**
 - Q12 What audit retention does compliance require? Is 7 years right?
@@ -408,7 +409,9 @@ Take these as a list. Blocking ones are marked.
 - Q16 What is the breach notification path if residual PII is found in a stored analysis?
 
 **Answer Q17 before anything else** — it decides whether the analyzer can call a model from the hosts
-you have at all. Then Q5 and Q8 before Phase 1 code, and Q1/Q2 before Phase 2.
+you have at all. Then Q5 and Q8 before Phase 1 code, and Q1/Q2 before Phase 2. **Q28 gates a
+hosted deployment only** — the CLI and the Phase 1 pilot do not wait on it, because neither puts
+client-derived content anywhere reachable over a network.
 
 Note what moved: Q1 and Q2 (may screenshots reach a model) no longer gate Phase 1 in any way, because
 Mode 0 now sends nothing *and copies nothing*. They gate only the vision capability in Phase 2. The rest can resolve during Phase 1 —
