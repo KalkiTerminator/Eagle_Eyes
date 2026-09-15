@@ -8,9 +8,16 @@ FROM python:3.12-slim AS build
 WORKDIR /build
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 
-# Dependencies first, so editing application code does not reinstall them.
+# The whole package, then install. An earlier version copied only
+# eagle_eyes/__init__.py here to keep the dependency layer cached across builds
+# -- and pyproject declares packages = ["eagle_eyes", "eagle_eyes.web"], so
+# setuptools went looking for a directory the stub did not include and failed
+# with `package directory 'eagle_eyes/web' does not exist` before downloading
+# anything. The cache only pays off on a builder that keeps layers between
+# builds, which a fresh cloud builder does not, so it bought very little and
+# cost a build.
 COPY pyproject.toml README.md ./
-COPY eagle_eyes/__init__.py eagle_eyes/
+COPY eagle_eyes/ ./eagle_eyes/
 RUN pip install --prefix=/install ".[web,postgres]"
 
 
@@ -35,12 +42,19 @@ ENV PYTHONUNBUFFERED=1 \
     EAGLE_EYES_IN_CONTAINER=1 \
     EAGLE_EYES_DATA_DIR=/data
 
-# Created and owned here so it works with no volume attached. With one
-# attached the platform mounts over it -- and runtime.ephemeral_storage_warning
-# says loudly which of those is happening, because writing to the image layer
-# works perfectly right up until the next deploy erases it.
+# The mount point, created and owned here so the app works with no volume at
+# all. Attaching one is the platform's job, not this file's: Railway REJECTS a
+# Dockerfile containing VOLUME outright ("docker VOLUME is not supported, use
+# Railway Volumes") -- at validation, before a single layer runs, so no check
+# that reads the built image would ever see it. There is nothing to declare
+# here anyway; VOLUME states an intent, mkdir is what makes the path usable.
+#
+# With PostgreSQL attached no volume is needed at all, because DATABASE_URL
+# sends everything there and the SQLite path is never touched.
+# runtime.ephemeral_storage_warning() reports which of those actually happened,
+# because writing to the image layer works perfectly right up until the next
+# deploy erases it.
 RUN mkdir -p /data && chown eagle:eagle /data
-VOLUME ["/data"]
 
 USER eagle
 EXPOSE 8000

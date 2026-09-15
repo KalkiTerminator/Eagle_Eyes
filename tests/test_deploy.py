@@ -219,6 +219,62 @@ def test_the_dockerfile_matches_what_the_app_needs() -> None:
           "--workers 1" in text)
 
 
+def test_the_dockerfile_has_nothing_the_platform_rejects() -> None:
+    """Railway validates the Dockerfile before building and refuses VOLUME.
+
+    This cost a deploy. The build never ran -- validation failed with "docker
+    VOLUME at Line 43 is not supported, use Railway Volumes" -- so every other
+    check in this file passed while the image could not be built at all. The
+    instruction was not even doing anything: VOLUME declares an intent, and the
+    `mkdir` above it is what actually makes the path usable.
+    """
+    text = (ROOT / "Dockerfile").read_text()
+    instructions = [ln.split()[0].upper() for ln in text.splitlines()
+                    if ln.strip() and not ln.strip().startswith("#")]
+    check("no VOLUME instruction", "VOLUME" not in instructions)
+    check("  and the mount point is still created",
+          "mkdir -p /data" in text)
+    check("  with the reason recorded, so nobody adds it back",
+          "Railway REJECTS" in text)
+
+
+def test_the_build_stage_can_install_the_project() -> None:
+    """Every package pyproject declares must be COPYed before `pip install`.
+
+    The build stage used to copy only `eagle_eyes/__init__.py`, to keep the
+    dependency layer cached. pyproject declares `eagle_eyes.web` as well, so
+    setuptools failed with `package directory 'eagle_eyes/web' does not exist`
+    before downloading a single dependency. Nothing here caught it, because the
+    image cannot be built in this environment -- so this reads the two files
+    against each other instead, and keeps working when a third subpackage is
+    added.
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    pyproject = (ROOT / "pyproject.toml").read_text()
+
+    declared = set(re.findall(r'"(eagle_eyes(?:\.\w+)*)"',
+                              re.search(r"packages\s*=\s*\[(.*?)\]",
+                                        pyproject, re.S).group(1)))
+    check("pyproject declares at least the two packages", len(declared) >= 2,
+          str(declared))
+
+    build_stage = dockerfile.split("FROM", 2)[1]      # everything before stage 2
+    install_at = build_stage.find("pip install")
+    check("the build stage installs the project", install_at > 0)
+    copied = re.findall(r"^COPY\s+(?!--from)(\S+)", build_stage[:install_at], re.M)
+
+    for package in sorted(declared):
+        path = package.replace(".", "/")
+        covered = any(c.rstrip("/") == path or path.startswith(c.rstrip("/") + "/")
+                      or c.rstrip("/") == path.split("/")[0]
+                      for c in copied)
+        check(f"{package} is copied in before the install", covered,
+              f"COPY lines seen: {copied}")
+
+    check("a whole directory is copied, not a stub module",
+          any(c.endswith("/") for c in copied), str(copied))
+
+
 def test_the_dockerignore_keeps_data_and_secrets_out_of_the_image() -> None:
     path = ROOT / ".dockerignore"
     check("there is a .dockerignore", path.is_file())
