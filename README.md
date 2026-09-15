@@ -3,9 +3,13 @@
 Analyses RPA bot failures. Reads the execution log, the error screenshot and the bot's source
 code, correlates them, and produces a root cause and a suggested fix.
 
-**Status: testable, not deployable.** The pipeline runs end to end against synthetic data with no
-credentials. It has not been run against a real estate, the diagnoses have not been judged by
-anyone, and several things listed under [What is not built](#what-is-not-built) are missing.
+**Status: deployable, unproven.** It runs three ways — a CLI over a network share, a container, and
+a hosted web product with real accounts and real access control. All of it works end to end against
+synthetic data.
+
+What that does *not* mean: it has never been run against a real estate, no developer has judged a
+single diagnosis, and several things under [What is not built](#what-is-not-built) are genuinely
+missing. The dedup and cost figures below are measured, but measured on fabricated failures.
 
 ---
 
@@ -32,7 +36,7 @@ python3 -m eagle_eyes ... --dry-run    # show what would be analysed, then stop
 python3 -m eagle_eyes ... --stats      # what the database holds
 ```
 
-Run the tests — 312 checks, none needing a credential:
+Run the tests — 700 checks, none needing a credential:
 
 ```bash
 python3 -m pytest tests/            # if you have pytest
@@ -42,6 +46,43 @@ for t in tests/test_*.py; do python3 "$t" ./sandbox; done   # or plain Python
 Both work. Running a file directly prints every result then summarises, so one failure does not
 hide the next five; under pytest each check raises so the runner sees it. Suites that need the
 sandbox skip with instructions if you have not generated it.
+
+## The hosted web product
+
+<!-- LIVE-URL -->
+*(A live instance is not linked here yet.)*
+
+```bash
+pip install '.[web,postgres]'
+EAGLE_EYES_SECRET_KEY=$(python3 -c 'import secrets;print(secrets.token_hex(24))') \
+EAGLE_EYES_ADMIN_EMAIL=you@example.com \
+EAGLE_EYES_ADMIN_PASSWORD=a-long-enough-password \
+python3 -m uvicorn --factory eagle_eyes.web.app:create_app --port 8000
+```
+
+A landing page, then **request access**, then nothing — until an administrator approves the account
+with a role. That gap is the design, not an unfinished flow: signing in and being allowed to see
+something are different questions, and an account that has not been approved cannot produce an
+identity the data layer will accept.
+
+| Role | Sees |
+|---|---|
+| admin | everything, plus approvals and the audit log |
+| manager | the service lines in their scope, and nothing else |
+| user | failures on bots they own |
+
+**Enforced in the query that selects the rows**, not in a check on a route. `FailureRepo._scope_sql`
+is the single place scoping happens; `_visible` states the same rule in Python and a test asserts
+the two agree row for row, for every role. A filter applied after `LIMIT` is not a filter — it is a
+page that silently comes back short.
+
+`tests/test_rbac.py` is written from the attacker's side: a pending account reaching anything, one
+user fetching another's failure by id, a manager reaching outside scope, an empty scope inverting
+into no filter at all, a forged cookie claiming a role.
+
+Deployment is a container: `Dockerfile`, `railway.toml`, PostgreSQL when `DATABASE_URL` is set and
+SQLite otherwise. **A hosted instance is approved for synthetic data only** — what must change
+before one sees real client data is [docs/PRODUCTION_MIGRATION.md](docs/PRODUCTION_MIGRATION.md).
 
 ## In VS Code
 
@@ -133,7 +174,6 @@ paid full price.) An unreachable share degrades to "no cache" and breaks nothing
 |---|---|
 | Language support | Log parsing is tuned to C#/.NET + Selenium. Other languages need the profile work. |
 | LLM providers | Anthropic only (Bedrock, or your own key). |
-| RBAC | Roles exist in the data model and every repository requires a principal, but a local install cannot enforce them against its own operator. Real enforcement needs the server. |
 | Known-pattern templates | The zero-cost path exists; nothing populates it. |
 | Metrics and structured logging | Only the budget guard. |
 
@@ -142,9 +182,13 @@ paid full price.) An unreachable share degrades to "no cache" and breaks nothing
 ```
 eagle_eyes/       runtime, discovery, selection, sanitize, fingerprint,
                   model_gateway, cache, analysis, storage, report, notify
+eagle_eyes/web/   the hosted product: auth, ingest, jobs, spend, seed, app
 eagle_eyes/prompts/   version-controlled prompt files
+eagle_eyes/schema.sql, schema_pg.sql   SQLite and PostgreSQL, kept in step by a test
+eagle_eyes/storage_pg.py   the dialect seam; repositories carry their own SQL
 tools/            fixture generator, model connectivity check
-tests/            312 checks, no credentials required
+tests/            700 checks on SQLite, 233 more against PostgreSQL,
+                  none needing a credential
 docs/             architecture, security, data model, cost model, roadmap
 ```
 
