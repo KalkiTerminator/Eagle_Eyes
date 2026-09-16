@@ -452,16 +452,29 @@ BOOTSTRAP_PASSWORD_VAR = "EAGLE_EYES_ADMIN_PASSWORD"
 
 def bootstrap_admin(db: Database, email: str, password: str,
                     display_name: str = "") -> Account:
-    """Create the first admin, once.
+    """Make the account at `email` the first admin, once.
 
     Every approval flows from an admin, so a fresh database has no way in until
     one exists. This is that way in, and it is deliberately narrow: it does
     nothing at all once any admin account exists, so it cannot be used to add a
     second admin by setting an environment variable on a running deployment.
 
-    The bootstrap is written to the audit log with `outcome='allow'` and an
-    actor of `bootstrap`, so the first admin's existence is a recorded event
-    rather than something that quietly appeared.
+    THE ADDRESS MAY ALREADY BE REGISTERED, and that is the common case rather
+    than an edge one: somebody deploys, opens the site, signs up, and only then
+    realises nobody can approve them. That used to raise a UNIQUE violation
+    which nothing caught, so setting the variable to your own address
+    crash-looped the container with a database error that read nothing like
+    "you already registered".
+
+    So an existing account is PROMOTED -- and its password is reset to the one
+    in the environment. Promoting without resetting would hand admin to
+    whoever registered that address first, which on a public URL is not
+    necessarily the operator. Whoever sets the variables controls the
+    credential; that is the whole basis on which this is safe.
+
+    Either way it is written to the audit log with an actor of `bootstrap`, so
+    the first admin's existence is a recorded event rather than something that
+    quietly appeared.
     """
     existing = db.conn.execute(
         "SELECT COUNT(*) n FROM account WHERE role=?", (ADMIN,)).fetchone()["n"]
@@ -472,19 +485,36 @@ def bootstrap_admin(db: Database, email: str, password: str,
 
     email = _clean_email(email)
     pw_hash, salt, params = hash_password(password)
+    row = db.conn.execute(
+        "SELECT id FROM account WHERE email=?", (email,)).fetchone()
+
     with db.tx() as c:
-        cur = c.execute(
-            "INSERT INTO account(email, display_name, password_hash, salt, params,"
-            " status, role, approved_by, approved_at, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (email, display_name.strip() or email.split("@")[0], pw_hash, salt,
-             params, APPROVED, ADMIN, "bootstrap", now(), now()))
+        if row:
+            account_id, action = row["id"], "bootstrap_promote"
+            c.execute(
+                "UPDATE account SET status=?, role=?, password_hash=?, salt=?,"
+                " params=?, approved_by=?, approved_at=?, failed_logins=0,"
+                " locked_until=NULL WHERE id=?",
+                (APPROVED, ADMIN, pw_hash, salt, params, "bootstrap", now(),
+                 account_id))
+            # The password just changed, so anything signed in under the old
+            # one stops working now rather than at its own expiry.
+            c.execute(
+                "UPDATE session SET revoked_at=? WHERE account_id=?"
+                " AND revoked_at IS NULL", (now(), account_id))
+        else:
+            cur = c.execute(
+                "INSERT INTO account(email, display_name, password_hash, salt, params,"
+                " status, role, approved_by, approved_at, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (email, display_name.strip() or email.split("@")[0], pw_hash, salt,
+                 params, APPROVED, ADMIN, "bootstrap", now(), now()))
+            account_id, action = cur.lastrowid, "bootstrap_admin"
+
         c.execute(
             "INSERT INTO audit_event(actor, actor_role, action, resource_type,"
             " resource_id, outcome, occurred_at) VALUES (?,?,?,?,?,?,?)",
-            ("bootstrap", ADMIN, "bootstrap_admin", "account",
-             str(cur.lastrowid), "allow", now()))
-        account_id = cur.lastrowid
+            ("bootstrap", ADMIN, action, "account", str(account_id), "allow", now()))
 
     return AccountRepo(db, Principal(actor="bootstrap", role=ADMIN)).by_id(account_id)
 
@@ -494,6 +524,15 @@ def bootstrap_from_env(db: Database, env: dict[str, str] | None = None) -> Accou
 
     Returns None when there is nothing to do -- no variables, or an admin
     already exists -- so a container can call this on every boot.
+
+    NOTHING HERE MAY STOP THE APPLICATION STARTING. This runs inside
+    AppState.__init__, so an exception escaping it takes the whole process
+    down, and a container that crash-loops is far worse than one running
+    without an admin: the second you can fix from the dashboard in a minute,
+    the first gives you a restart loop and a stack trace. So every failure is
+    caught, reported on stdout where the platform's log will show it, and
+    swallowed. A too-short password and an unreachable database look the same
+    from here and neither is worth a crash.
     """
     import os
     env = env if env is not None else dict(os.environ)
@@ -503,5 +542,14 @@ def bootstrap_from_env(db: Database, env: dict[str, str] | None = None) -> Accou
         return None
     try:
         return bootstrap_admin(db, email, password)
-    except AuthError:
+    except AuthError as exc:
+        # The ordinary "an admin already exists" path, on every boot after the
+        # first. Not worth a line in the log each time.
+        if "already exists" not in str(exc):
+            print(f"  ! admin bootstrap skipped: {exc}", flush=True)
+        return None
+    except Exception as exc:                        # noqa: BLE001 - see docstring
+        print(f"  ! admin bootstrap failed ({type(exc).__name__}: {exc}). "
+              f"The app is starting without one; fix {BOOTSTRAP_EMAIL_VAR} / "
+              f"{BOOTSTRAP_PASSWORD_VAR} and redeploy.", flush=True)
         return None

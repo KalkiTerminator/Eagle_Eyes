@@ -26,7 +26,8 @@ from eagle_eyes.storage import (  # noqa: E402
 )
 from eagle_eyes.web.auth import (  # noqa: E402
     APPROVED, REQUESTED, REVOKED, SUSPENDED, Account, AccountRepo, AuthError,
-    SessionRepo, bootstrap_admin, hash_password, read_cookie, sign_cookie,
+    SessionRepo, bootstrap_admin, bootstrap_from_env, hash_password,
+    read_cookie, sign_cookie,
     verify_password,
 )
 
@@ -93,6 +94,15 @@ def _account(db: Database, email: str, *, role: str = USER,
     elif status != REQUESTED:
         repo.set_status(aid, status)
     return repo.by_id(aid)
+
+
+def _try(fn) -> str:
+    """Run something expected to fail; return the message, or "" if it did not."""
+    try:
+        fn()
+    except Exception as exc:
+        return str(exc)
+    return ""
 
 
 # ------------------------------------------------------- passwords
@@ -467,6 +477,106 @@ def test_the_last_admin_cannot_be_removed() -> None:
         check("once a second admin exists, the first can be revoked",
               repo.by_id(admin.id).status == REVOKED)
         check("  and the second is untouched", repo.by_id(second.id).is_approved)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_bootstrap_promotes_an_account_that_already_registered() -> None:
+    """The common case, not an edge one.
+
+    Somebody deploys, opens the site, signs up, and only then realises nobody
+    can approve them -- so they set the admin variables to their own address.
+    That used to raise a UNIQUE violation which nothing caught, taking the
+    whole container down with a database error that read nothing like "you
+    already registered". It promotes instead.
+
+    And it resets the password while doing so. Promoting without resetting
+    would hand admin to whoever registered the address first, which on a public
+    URL is not necessarily the operator. Whoever sets the variables controls
+    the credential -- that is the basis on which this is safe at all.
+    """
+    db, d, _ = _world()
+    try:
+        repo = AccountRepo(db, ADMIN_P)
+        account_id = repo.register("owner@x.com", PASSWORD, "Owner")
+        sessions = SessionRepo(db, ADMIN_P)
+        live = sessions.create(account_id)
+        check("the account starts out requested",
+              repo.by_id(account_id).status == REQUESTED)
+
+        new_password = "a-different-long-password"
+        promoted = bootstrap_admin(db, "Owner@X.com ", new_password)
+
+        check("the same account is promoted, not a second one created",
+              promoted.id == account_id, f"{promoted.id} vs {account_id}")
+        check("  even though the address was cased and padded differently",
+              promoted.email == "owner@x.com")
+        check("  to admin", promoted.role == ADMIN)
+        check("  and approved", promoted.is_approved)
+        check("  keeping the name they registered with",
+              promoted.display_name == "Owner")
+        check("only one account exists",
+              db.conn.execute("SELECT COUNT(*) n FROM account").fetchone()["n"] == 1)
+
+        check("the password they chose no longer works",
+              "incorrect" in _try(lambda: repo.authenticate("owner@x.com", PASSWORD)))
+        check("  and the one from the environment does",
+              repo.authenticate("owner@x.com", new_password).role == ADMIN)
+        check("sessions opened under the old password are revoked",
+              sessions.lookup(live) is None)
+
+        row = db.conn.execute(
+            "SELECT action FROM audit_event WHERE actor='bootstrap'").fetchone()
+        check("the promotion is audited as a promotion, not a creation",
+              row is not None and row["action"] == "bootstrap_promote",
+              row["action"] if row else "absent")
+
+        check("and a second bootstrap still does nothing",
+              "already exists" in _try(
+                  lambda: bootstrap_admin(db, "someone@else.com", PASSWORD)))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_bootstrap_never_stops_the_app_starting() -> None:
+    """It runs inside AppState.__init__, so anything escaping it kills the boot.
+
+    A container running without an admin is a minute's work to fix from the
+    dashboard. A container that crash-loops is a stack trace and a rollback.
+    """
+    db, d, _ = _world()
+    try:
+        check("no variables means nothing to do",
+              bootstrap_from_env(db, {}) is None)
+
+        check("a password below the minimum is refused, not raised",
+              bootstrap_from_env(db, {"EAGLE_EYES_ADMIN_EMAIL": "a@b.com",
+                                      "EAGLE_EYES_ADMIN_PASSWORD": "short"}) is None)
+        check("  and no account was created",
+              AccountRepo(db, ADMIN_P).by_email("a@b.com") is None)
+
+        check("an unusable email is refused, not raised",
+              bootstrap_from_env(db, {"EAGLE_EYES_ADMIN_EMAIL": "not-an-email",
+                                      "EAGLE_EYES_ADMIN_PASSWORD": PASSWORD}) is None)
+
+        class Broken:
+            """A database that fails the way an unreachable one does."""
+            @property
+            def conn(self):
+                raise RuntimeError("connection refused")
+
+        check("a database that will not answer is refused, not raised",
+              bootstrap_from_env(Broken(), {"EAGLE_EYES_ADMIN_EMAIL": "a@b.com",
+                                            "EAGLE_EYES_ADMIN_PASSWORD": PASSWORD})
+              is None)
+
+        good = bootstrap_from_env(db, {"EAGLE_EYES_ADMIN_EMAIL": "root2@x.com",
+                                       "EAGLE_EYES_ADMIN_PASSWORD": PASSWORD})
+        check("and a good one still works after all that", good is not None
+              and good.role == ADMIN)
+        check("a later boot is a quiet no-op",
+              bootstrap_from_env(db, {"EAGLE_EYES_ADMIN_EMAIL": "root2@x.com",
+                                      "EAGLE_EYES_ADMIN_PASSWORD": PASSWORD}) is None)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
