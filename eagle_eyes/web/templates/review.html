@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Review — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>What the folder contained</h1>
+<p class="lede">
+  Read with the same discovery the scanner uses. <b>{{ candidates|length }}</b>
+  failures found across <b>{{ bots }}</b> bots. Nothing has been sent to a model
+  — tick what you want analysed.
+</p>
+
+{% if skipped %}
+<div class="warn"><b>{{ skipped|length }} file(s) were skipped.</b>
+  <span class="tiny">{{ skipped[:4]|join('; ') }}{% if skipped|length > 4 %} …{% endif %}</span></div>
+{% endif %}
+
+<div class="grid g4" style="margin-bottom:20px">
+  <div class="tile"><div class="k">Failures found</div><div class="n">{{ candidates|length }}</div>
+    <div class="note">One per log with an exception in it.</div></div>
+  <div class="tile"><div class="k">Distinct problems</div><div class="n">{{ distinct }}</div>
+    <div class="note">Fingerprinted before anything is sent — repeats cost nothing.</div></div>
+  <div class="tile"><div class="k">Screenshots paired</div><div class="n">{{ paired }}</div>
+    <div class="note">{{ refused }} refused: two candidates too close in time to choose between.</div></div>
+  <div class="tile"><div class="k">Would call the model</div><div class="n">{{ distinct }}</div>
+    <div class="note">Not {{ candidates|length }}. That gap is the product.</div></div>
+</div>
+
+<form method="post" action="/app/analyse">
+  <input type="hidden" name="token" value="{{ token }}">
+  <div class="card">
+    <h3>Review <span class="hint">unticked rows are not sent, and not charged for</span></h3>
+    <table>
+      <tr>
+        <th style="width:34px"><input type="checkbox" id="all" checked></th>
+        <th>Bot</th><th>When</th><th>Exception</th><th>Inputs</th><th>Screenshot</th>
+      </tr>
+      {% for c in candidates %}
+      <tr>
+        <td><input type="checkbox" name="pick" value="{{ loop.index0 }}" checked
+                   {% if c.first_of_fingerprint %}data-first="1"{% endif %}></td>
+        <td class="small"><b>{{ c.service_line }}</b>/{{ c.bot_number }}<div class="tiny muted">{{ c.date }}</div></td>
+        <td class="mono tiny">{{ c.occurred_at or '—' }}</td>
+        <td class="small">{{ c.exception_type or 'no exception found' }}
+          <div class="tiny muted">{{ c.message|truncate(74) }}</div></td>
+        <td class="tiny mono">{{ c.inputs }}</td>
+        <td class="small">
+          {% if c.pairing_method == 'none' %}
+            <span class="pill no">none</span>
+            <div class="tiny muted">{{ c.pairing_note or 'refused' }}</div>
+          {% else %}
+            <span class="pill ok">{{ c.pairing_method }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p style="margin:18px 0 0">
+      <button type="submit">Analyse the ticked rows</button>
+      <a class="btn ghost" href="/app" style="margin-left:6px">Start over</a>
+    </p>
+    <p class="tiny muted" style="margin:12px 0 0">
+      <b>code*</b> means the source file was modified after the failure, so it may
+      not be what ran — confidence is capped for those. <b>shot</b> means a
+      screenshot was matched to this exact log by its own capture line.
+    </p>
+  </div>
+</form>
+
+<script>
+document.getElementById('all').addEventListener('change', e => {
+  document.querySelectorAll('input[name=pick]').forEach(b => b.checked = e.target.checked);
+});
+</script>
+{% endblock %}

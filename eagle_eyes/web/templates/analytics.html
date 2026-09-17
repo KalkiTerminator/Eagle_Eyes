@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Analytics — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>Analytics</h1>
+<p class="lede">
+  Everything here is computed over the rows you are allowed to open — as a
+  <b>{{ account.role }}</b>{% if account.scope %}, covering {{ account.scope|join(', ') }}{% endif %}.
+  A chart is data: a trend line drawn over failures you cannot read would tell
+  you how busy another team is, so these are scoped in the query, not the page.
+</p>
+
+<div class="grid g4" style="margin-bottom:20px">
+  <div class="tile"><div class="k">Failures</div><div class="n">{{ stats.failures }}</div>
+    <div class="note">In your scope, all time.</div></div>
+  <div class="tile"><div class="k">Distinct problems</div><div class="n">{{ stats.fingerprints }}</div>
+    <div class="note">{{ stats.failures }} failures were only {{ stats.fingerprints }} different causes.</div></div>
+  <div class="tile"><div class="k">Answered from store</div><div class="n">{{ stats.dedup_rate|pct }}</div>
+    <div class="note">Repeats resolved at zero cost.</div></div>
+  <div class="tile"><div class="k">Spent</div><div class="n">{{ stats.spend_usd|money }}</div>
+    <div class="note">{{ saved|money }} saved by not re-analysing repeats.</div></div>
+</div>
+
+<div class="card">
+  <h3>Failures per day <span class="hint">last {{ trend_days }} days</span></h3>
+  {{ trend_svg|safe }}
+</div>
+
+<div class="grid g2" style="margin-top:16px">
+  <div class="card">
+    <h3>What fails most <span class="hint">by occurrences</span></h3>
+    {{ top_svg|safe }}
+    {% if top %}
+    <table style="margin-top:14px">
+      <tr><th>Cause</th><th>Where</th><th class="num">Seen</th><th class="num">Cost</th></tr>
+      {% for t in top %}
+      <tr>
+        <td class="small">{{ t.exception_type|truncate(38) }}</td>
+        <td class="tiny mono muted">{{ t.where }}</td>
+        <td class="num">{{ t.n }}</td>
+        <td class="num">{{ t.cost|money }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3>How sure the diagnoses were</h3>
+    {{ confidence_svg|safe }}
+    <p class="tiny muted" style="margin-top:12px">
+      A tall bar at the low end is not a bug — it is the product refusing to
+      sound certain. Anything under 0.30 is reported as a lead to check, and a
+      diagnosis whose source file changed after the failure is capped there
+      regardless of how confident the model was.
+    </p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>How each failure was answered</h3>
+  {{ path_svg|safe }}
+  <p class="tiny muted" style="margin-top:12px">
+    <b>dedup</b> came from the store at no cost. <b>text</b> is log and code.
+    <b>vision</b> added the screenshot. <b>fallback</b> means the model's answer
+    could not be parsed and the report says so at zero confidence rather than
+    inventing a cause. <b>skipped</b> had no exception to diagnose.
+  </p>
+</div>
+
+{% if feedback %}
+<div class="card" style="margin-top:16px">
+  <h3>What developers said <span class="hint">the only ground truth there is</span></h3>
+  {{ feedback_svg|safe }}
+  <p class="tiny muted" style="margin-top:12px">
+    An analysis marked <b>wrong</b> is never served again for that fingerprint —
+    the next person to hit it pays for a fresh one rather than inheriting the
+    mistake.
+  </p>
+</div>
+{% endif %}
+{% endblock %}

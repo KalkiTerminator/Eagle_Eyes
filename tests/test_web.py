@@ -231,8 +231,8 @@ def test_the_full_journey() -> None:
         _login(c, "dev@x.com")
         r = c.get("/app")
         check("the approved user gets the home page", r.status_code == 200)
-        check("  scoped and said to be scoped", "scoped to what you are allowed"
-              in r.text)
+        check("  with the tab bar", 'nav class="tabs"' in r.text)
+        check("  and the folder picker", "Drop a bot folder" in r.text)
 
         r = _submit(c,
                     code=("Bot.cs.txt", b"public class Bot { void Run(){ Click(); } }",
@@ -292,7 +292,7 @@ def test_one_user_cannot_read_anothers_failure_over_http() -> None:
               "deliberately the same one" in r.text)
 
         check("mallory's home lists nothing",
-              "Nothing is visible to you yet" in c.get("/app").text)
+              "Nothing visible to you yet" in c.get("/app").text)
         check("mallory cannot post feedback on it",
               c.post(f"/failures/{failure_id}/feedback",
                      data={"verdict": "correct"}).status_code == 404)
@@ -343,8 +343,12 @@ def test_a_forged_or_stale_cookie_gets_nothing() -> None:
             ("an unsigned session id", "f" * 64),
             ("a wrong signature", "f" * 64 + ".deadbeef"),
             ("a role smuggled into the value", "admin.admin"),
+            # Flip the first character to something guaranteed different.
+            # This case used to build "0" + real[1:], which alters nothing at
+            # all when the session id already starts with a zero -- a security
+            # check that quietly passed for the wrong reason one run in sixteen.
             ("an altered id on a real signature",
-             "0" + (real or "x.y")[1:]),
+             ("1" if (real or "0")[0] == "0" else "0") + (real or "x.y")[1:]),
             ("empty", ""),
         ):
             c.cookies.clear()

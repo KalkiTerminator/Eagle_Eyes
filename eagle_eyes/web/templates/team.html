@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Team — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>Team</h1>
+<p class="lede">
+  {% if account.role == 'admin' %}
+    Every service line. You are an administrator, so nothing is filtered out.
+  {% else %}
+    The service lines in your scope: <b>{{ account.scope|join(', ') }}</b>.
+    Lines outside it are not hidden from this page — they are not in the query.
+  {% endif %}
+</p>
+
+<div class="grid g4" style="margin-bottom:20px">
+  <div class="tile"><div class="k">Service lines</div><div class="n">{{ lines|length }}</div>
+    <div class="note">In your scope.</div></div>
+  <div class="tile"><div class="k">Failures</div><div class="n">{{ stats.failures }}</div>
+    <div class="note">Across all of them.</div></div>
+  <div class="tile"><div class="k">Answered from store</div><div class="n">{{ stats.dedup_rate|pct }}</div>
+    <div class="note">The higher this is, the less a spike costs.</div></div>
+  <div class="tile"><div class="k">Spent</div><div class="n">{{ stats.spend_usd|money }}</div>
+    <div class="note">{{ saved|money }} avoided by deduplication.</div></div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <h3>Failures by service line</h3>
+    {{ lines_svg|safe }}
+  </div>
+  <div class="card">
+    <h3>Spend by service line</h3>
+    {{ spend_svg|safe }}
+    <p class="tiny muted" style="margin-top:12px">
+      Volume and cost are deliberately two charts rather than one with two
+      axes. A line has many cheap repeats or a few expensive novel failures,
+      and a dual axis would let either look like the other.
+    </p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>Bots, worst first</h3>
+  {% if bots %}
+  <table>
+    <tr><th>Bot</th><th>Owner</th><th class="num">Failures</th><th class="num">Distinct</th>
+        <th class="num">Cost</th><th>Last seen</th></tr>
+    {% for b in bots %}
+    <tr>
+      <td class="small"><b>{{ b.service_line }}</b>/{{ b.bot_number }}</td>
+      <td class="tiny muted">{{ b.owner or '—' }}</td>
+      <td class="num">{{ b.n }}</td>
+      <td class="num">{{ b.fingerprints }}</td>
+      <td class="num">{{ b.cost|money }}</td>
+      <td class="mono tiny">{{ b.last_seen }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="tiny muted" style="margin-top:12px">
+    A bot with many failures and few distinct ones is one problem happening
+    repeatedly — usually the cheapest thing on this page to fix.
+  </p>
+  {% else %}
+  <p class="muted">No bots in your scope have recorded a failure.</p>
+  {% endif %}
+</div>
+{% endblock %}

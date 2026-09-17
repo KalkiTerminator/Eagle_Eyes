@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Analyse — Eagle Eyes{% endblock %}
+{% block body %}
+
+<h1>Analyse</h1>
+<p class="lede">
+  Drop the folder a bot writes to and Eagle Eyes reads it the way the scanner
+  does — service line and bot number from the path, each screenshot matched to
+  its own log, nothing paired that cannot be paired with confidence. You see
+  what it found before anything is sent.
+</p>
+
+{% if error %}<div class="bad">{{ error }}</div>{% endif %}
+
+<div class="grid g4" style="margin-bottom:22px">
+  <div class="tile"><div class="k">Visible to you</div><div class="n">{{ stats.failures }}</div>
+    <div class="note">As a {{ account.role }}{% if account.scope %}, covering {{ account.scope|join(', ') }}{% endif %}.</div></div>
+  <div class="tile"><div class="k">Distinct problems</div><div class="n">{{ stats.fingerprints }}</div>
+    <div class="note">How many genuinely different failures those are.</div></div>
+  <div class="tile"><div class="k">Answered from store</div><div class="n">{{ stats.dedup_rate|pct }}</div>
+    <div class="note">Repeats resolved without calling a model.</div></div>
+  <div class="tile"><div class="k">Spent</div><div class="n">{{ stats.spend_usd|money }}</div>
+    <div class="note">Real provider spend on what you can see.</div></div>
+</div>
+
+<div class="card">
+  <h3>Pick a folder <span class="hint">the whole tree, as the scanner sees it</span></h3>
+
+  <form method="post" action="/app/discover" enctype="multipart/form-data" id="f">
+    <div class="drop" id="drop">
+      <input type="file" id="picker" name="files" multiple webkitdirectory directory hidden>
+      <input type="file" id="picker2" name="files" multiple hidden>
+      <p style="margin:0 0 12px"><b>Drop a bot folder here</b></p>
+      <p class="small muted" style="margin:0 0 14px">
+        <span class="mono">…/data/&lt;service line&gt;/&lt;bot&gt;/&lt;year&gt;/&lt;month&gt;/&lt;day&gt;/logs/…</span><br>
+        Or any part of it — one bot, one day, or the whole share.
+      </p>
+      <button type="button" class="btn" onclick="picker.click()">Choose folder</button>
+      <button type="button" class="btn ghost" onclick="picker2.click()" style="margin-left:6px">Choose files</button>
+      <p class="tiny muted" id="count" style="margin:14px 0 0"></p>
+    </div>
+    <p style="margin:16px 0 0"><button type="submit" id="go" disabled>Read the folder</button>
+      <span class="tiny muted" style="margin-left:10px">Nothing is sent to a model at this step.</span></p>
+  </form>
+
+  <p class="tiny muted" style="margin:16px 0 0; border-top:1px solid var(--line-soft); padding-top:12px">
+    Files are read in your browser and uploaded with their relative paths, which
+    is what lets the service line and bot number come from the path rather than
+    from log content — log content is attacker-influenced, a directory name is
+    not. Every path is validated before anything is written.
+  </p>
+</div>
+
+<h2>Scheduled scans</h2>
+
+{% if not can_scan %}
+<div class="warn"><b>Schedules will not run on this instance.</b> {{ scan_reason }}</div>
+{% endif %}
+
+<div class="card">
+  {% if schedules %}
+  <table>
+    <tr><th>Name</th><th>Path on the host</th><th class="num">Every</th><th>Last run</th><th></th></tr>
+    {% for s in schedules %}
+    <tr>
+      <td><b>{{ s.name }}</b>{% if not s.enabled %} <span class="pill">paused</span>{% endif %}</td>
+      <td class="mono tiny muted">{{ s.target_path }}</td>
+      <td class="num">{{ s.every_minutes }}m</td>
+      <td class="small">
+        {% if s.healthy %}<span class="pill ok">{{ s.last_outcome }}</span>
+        {% elif s.last_outcome %}<span class="pill no">{{ s.last_outcome }}</span>
+        {% else %}<span class="pill wait">never</span>{% endif %}
+        <div class="tiny muted" style="margin-top:3px">{{ s.outcome_text }}{% if s.last_found %} — {{ s.last_found }} found, {{ s.last_analysed }} analysed{% endif %}</div>
+      </td>
+      <td>
+        <form method="post" action="/schedules/{{ s.id }}/toggle" style="display:inline">
+          <button class="ghost small" type="submit">{{ 'Pause' if s.enabled else 'Resume' }}</button>
+        </form>
+        <form method="post" action="/schedules/{{ s.id }}/delete" style="display:inline">
+          <button class="ghost small" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted small" style="margin:0 0 4px">No schedules yet.</p>
+  {% endif %}
+
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer; font-size:14px; font-weight:600">Add a schedule</summary>
+    <form method="post" action="/schedules" style="margin-top:8px">
+      <div class="grid g2">
+        <div><label for="name">Name</label><input id="name" name="name" type="text" required placeholder="Overnight sweep"></div>
+        <div><label for="every">Every (minutes)</label><input id="every" name="every_minutes" type="number" min="5" value="60" required></div>
+      </div>
+      <label for="target">Folder to scan <span class="muted">— on the machine running Eagle Eyes</span></label>
+      <input id="target" name="target_path" type="text" required placeholder="\\Network_Sharing_Folder\data\FINANCE_AP\BOT201">
+      <div class="grid g2">
+        <div><label for="share">Share root</label><input id="share" name="share_root" type="text" required placeholder="\\Network_Sharing_Folder"></div>
+        <div><label for="code">Code folder</label><input id="code" name="code_root" type="text" placeholder="\\Network_Sharing_Folder\code_folder"></div>
+      </div>
+      <p style="margin:16px 0 0"><button type="submit">Add schedule</button></p>
+    </form>
+  </details>
+</div>
+
+<h2>Recent failures</h2>
+<div class="card">
+  {% if failures %}
+  <table>
+    <tr><th>When</th><th>Bot</th><th>Root cause</th><th class="num">Confidence</th><th>Path</th></tr>
+    {% for f in failures %}
+    <tr>
+      <td class="mono tiny">{{ f['occurred_at'] }}</td>
+      <td class="small">{{ f['service_line'] }}/{{ f['bot_number'] }}</td>
+      <td><a href="/failures/{{ f['id'] }}">{{ (f['root_cause'] or 'Not analysed')|truncate(84) }}</a></td>
+      <td class="num">
+        {% set c = f['confidence'] or 0 %}
+        {% if c >= 0.7 %}<span class="pill ok">{{ '%.2f'|format(c) }}</span>
+        {% elif c >= 0.3 %}<span class="pill wait">{{ '%.2f'|format(c) }}</span>
+        {% else %}<span class="pill no">{{ '%.2f'|format(c) }}</span>{% endif %}
+      </td>
+      <td class="small muted">{{ f['path'] or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">
+    Nothing visible to you yet. As a <b>{{ account.role }}</b> that is the correct
+    answer rather than an empty database —
+    {% if account.role == 'user' %}you see failures on bots you own{% elif account.role == 'manager' %}you see the service lines in your scope{% else %}you see everything{% endif %}.
+  </p>
+  {% endif %}
+</div>
+
+<script>
+const drop = document.getElementById('drop'), go = document.getElementById('go'),
+      count = document.getElementById('count'), form = document.getElementById('f');
+let chosen = [];
+
+function show(files) {
+  chosen = files;
+  const bytes = files.reduce((n, f) => n + f.size, 0);
+  count.textContent = files.length
+    ? `${files.length} files selected · ${(bytes / 1048576).toFixed(1)} MB`
+    : '';
+  go.disabled = !files.length;
+}
+picker.addEventListener('change', e => show([...e.target.files]));
+picker2.addEventListener('change', e => show([...e.target.files]));
+
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add('hot');
+}));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove('hot');
+}));
+drop.addEventListener('drop', async e => {
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      await new Promise(res => entry.file(f => {
+        Object.defineProperty(f, '_rel', { value: prefix + f.name });
+        out.push(f); res();
+      }));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise(res => reader.readEntries(res));
+        for (const child of batch) await walk(child, prefix + entry.name + '/');
+      } while (batch.length);
+    }
+  };
+  const roots = [...e.dataTransfer.items]
+    .map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  for (const r of roots) await walk(r, '');
+  show(out);
+});
+
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  const data = new FormData();
+  for (const f of chosen) {
+    // The relative path is the point: it carries service line, bot and date.
+    data.append('files', f, f.webkitRelativePath || f._rel || f.name);
+    data.append('paths', f.webkitRelativePath || f._rel || f.name);
+  }
+  go.disabled = true; go.textContent = 'Reading…';
+  fetch('/app/discover', { method: 'POST', body: data })
+    .then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); })
+    .catch(() => { go.disabled = false; go.textContent = 'Read the folder'; });
+});
+</script>
+{% endblock %}

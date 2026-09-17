@@ -185,7 +185,7 @@ def test_migrate_is_idempotent() -> None:
         n = db.conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
             " AND name NOT LIKE 'sqlite_%'").fetchone()[0]
-        check("all tables created", n == 15, str(n))
+        check("all tables created", n == 16, str(n))
         db.conn.execute("PRAGMA user_version = 99")
         try:
             db.migrate()

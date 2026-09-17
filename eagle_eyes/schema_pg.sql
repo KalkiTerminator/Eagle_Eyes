@@ -310,3 +310,25 @@ CREATE TABLE IF NOT EXISTS session (
 
 CREATE INDEX IF NOT EXISTS idx_session_account ON session (account_id) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_session_expiry  ON session (expires_at);
+
+-- ---------- scheduled scans ----------
+-- See schema.sql: a schedule reads a path on the machine running the process.
+
+CREATE TABLE IF NOT EXISTS scan_schedule (
+    id            BIGSERIAL PRIMARY KEY,
+    account_id    BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    target_path   TEXT NOT NULL,
+    share_root    TEXT NOT NULL,
+    code_root     TEXT NOT NULL,
+    every_minutes INTEGER NOT NULL CHECK (every_minutes >= 5),
+    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_run_at   TIMESTAMPTZ,
+    last_outcome  TEXT,
+    last_found    INTEGER NOT NULL DEFAULT 0,
+    last_analysed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (account_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_due ON scan_schedule (enabled, last_run_at);

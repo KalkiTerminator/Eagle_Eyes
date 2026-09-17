@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def now() -> str:
@@ -290,7 +290,29 @@ CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DE
 CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
 """
 
-MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4}
+MIGRATION_5 = """
+CREATE TABLE scan_schedule (
+    id            INTEGER PRIMARY KEY,
+    account_id    INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    target_path   TEXT NOT NULL,
+    share_root    TEXT NOT NULL,
+    code_root     TEXT NOT NULL,
+    every_minutes INTEGER NOT NULL CHECK (every_minutes >= 5),
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    last_run_at   TEXT,
+    last_outcome  TEXT,
+    last_found    INTEGER NOT NULL DEFAULT 0,
+    last_analysed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (account_id, name)
+);
+
+CREATE INDEX idx_schedule_due ON scan_schedule (enabled, last_run_at);
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3,
+                              4: MIGRATION_4, 5: MIGRATION_5}
 
 
 # How long a writer waits for another writer before giving up. SQLite allows
@@ -394,6 +416,16 @@ class Database:
             self.conn.execute("ROLLBACK")
             raise
         self.conn.execute("COMMIT")
+
+    @staticmethod
+    def day_expr(column: str) -> str:
+        """SQL grouping `column` to a YYYY-MM-DD string, per dialect.
+
+        Timestamps are TEXT here and TIMESTAMPTZ in PostgreSQL, so `substr`
+        works on one and not the other. One method rather than a dialect check
+        wherever a chart groups by day.
+        """
+        return f"substr({column}, 1, 10)"
 
     @staticmethod
     def encode_list(values) -> str:
@@ -704,6 +736,98 @@ class FailureRepo(Repository):
                 "spend_usd": spend}
 
 
+    # -- analytics -----------------------------------------------------
+    #
+    # Every one of these goes through _scope_sql. A chart is data: a trend line
+    # drawn over rows the reader cannot open would leak exactly what the
+    # scoping exists to prevent -- how busy another team is, and what it costs.
+
+    def daily_counts(self, days: int = 30) -> list[tuple[str, int, int]]:
+        """(day, failures, deduped) for the last `days`, oldest first."""
+        where, args = self._scope_sql()
+        day = self.db.day_expr("f.occurred_at")
+        rows = self.db.conn.execute(
+            f"SELECT {day} d, COUNT(*) n,"
+            f" SUM(CASE WHEN f.was_deduped = TRUE THEN 1 ELSE 0 END) dedup"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id WHERE TRUE{where}"
+            f" GROUP BY {day} ORDER BY {day} DESC LIMIT ?",
+            [*args, max(1, min(days, 365))]).fetchall()
+        return [(r["d"], r["n"], r["dedup"] or 0) for r in reversed(rows)]
+
+    def top_fingerprints(self, limit: int = 8) -> list[dict]:
+        """The failures that happen most, with what they cost to diagnose."""
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT fp.exception_type, fp.normalized_message, fp.code_location,"
+            f" COUNT(*) n, MAX(f.occurred_at) last_seen,"
+            f" COALESCE(MAX(a.confidence), 0) confidence,"
+            f" COALESCE(SUM(a.cost_usd), 0) cost"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" JOIN fingerprint fp ON fp.id = f.fingerprint_id"
+            f" LEFT JOIN analysis a ON a.id = f.analysis_id"
+            f" WHERE TRUE{where} GROUP BY fp.id, fp.exception_type,"
+            f" fp.normalized_message, fp.code_location"
+            f" ORDER BY n DESC, last_seen DESC LIMIT ?",
+            [*args, max(1, min(limit, 50))]).fetchall()
+        return [dict(r) for r in rows]
+
+    def confidence_buckets(self) -> list[tuple[str, int]]:
+        """How sure the diagnoses were. A tall low bucket is a quality signal."""
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT a.confidence c FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" JOIN analysis a ON a.id=f.analysis_id WHERE TRUE{where}",
+            args).fetchall()
+        buckets = {"0.0-0.3": 0, "0.3-0.5": 0, "0.5-0.7": 0, "0.7-0.9": 0, "0.9-1.0": 0}
+        for r in rows:
+            c = float(r["c"] or 0)
+            if c < 0.3:   buckets["0.0-0.3"] += 1
+            elif c < 0.5: buckets["0.3-0.5"] += 1
+            elif c < 0.7: buckets["0.5-0.7"] += 1
+            elif c < 0.9: buckets["0.7-0.9"] += 1
+            else:         buckets["0.9-1.0"] += 1
+        return list(buckets.items())
+
+    def path_breakdown(self) -> list[tuple[str, int]]:
+        """Which route each analysis took -- the dedup story, in one chart."""
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT COALESCE(a.path, 'not analysed') p, COUNT(*) n"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} GROUP BY COALESCE(a.path, 'not analysed')"
+            f" ORDER BY n DESC", args).fetchall()
+        return [(r["p"], r["n"]) for r in rows]
+
+    def by_service_line(self) -> list[dict]:
+        """Per service line: volume, distinct problems, spend. The manager view."""
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT b.service_line, COUNT(*) n,"
+            f" COUNT(DISTINCT f.fingerprint_id) fingerprints,"
+            f" SUM(CASE WHEN f.was_deduped = TRUE THEN 1 ELSE 0 END) dedup,"
+            f" COALESCE(SUM(a.cost_usd), 0) cost"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} GROUP BY b.service_line ORDER BY n DESC",
+            args).fetchall()
+        return [dict(r) for r in rows]
+
+    def by_bot(self, limit: int = 12) -> list[dict]:
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT b.service_line, b.bot_number, COALESCE(d.email, '') owner,"
+            f" COUNT(*) n, COUNT(DISTINCT f.fingerprint_id) fingerprints,"
+            f" COALESCE(SUM(a.cost_usd), 0) cost, MAX(f.occurred_at) last_seen"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN developer d ON d.id = b.owner_dev_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} GROUP BY b.id, b.service_line, b.bot_number,"
+            f" COALESCE(d.email, '') ORDER BY n DESC LIMIT ?",
+            [*args, max(1, min(limit, 100))]).fetchall()
+        return [dict(r) for r in rows]
+
+
 class FeedbackRepo(Repository):
     """Developer verdicts. The ground truth that makes improvement possible.
 
@@ -731,8 +855,20 @@ class FeedbackRepo(Repository):
         self._audit("feedback", "analysis", analysis_id)
 
     def tally(self) -> dict[str, int]:
+        """Verdict counts over the failures this principal can see.
+
+        This used to count every row in the table. A plain user asking how the
+        diagnoses were rated got the answer for the whole estate -- a small
+        leak, but the same kind stats() is scoped to avoid, and inconsistent
+        with it in a way nobody would notice from reading either one.
+        """
+        scoped = FailureRepo(self.db, self.p)
+        where, args = scoped._scope_sql()
         rows = self.db.conn.execute(
-            "SELECT verdict, COUNT(*) n FROM feedback GROUP BY verdict").fetchall()
+            f"SELECT fb.verdict, COUNT(*) n FROM feedback fb"
+            f" JOIN failure f ON f.id = fb.failure_id"
+            f" JOIN bot b ON b.id = f.bot_id WHERE TRUE{where}"
+            f" GROUP BY fb.verdict", args).fetchall()
         return {r["verdict"]: r["n"] for r in rows}
 
 

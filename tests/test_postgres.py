@@ -236,7 +236,7 @@ def test_against_a_real_server() -> None:
         n = db.conn.execute(
             "SELECT COUNT(*) n FROM information_schema.tables"
             " WHERE table_schema='public'").fetchone()["n"]
-        check("every table exists", n == 15, str(n))
+        check("every table exists", n == 16, str(n))
 
         fp = FingerprintRepo(db, p).touch("a" * 64, 1, "E", "m", "l.cs:1")
         for path in sorted({x.value for x in Path_}):

@@ -601,6 +601,33 @@ CREATE TABLE session (
 
 CREATE INDEX idx_session_account ON session (account_id) WHERE revoked_at IS NULL;
 CREATE INDEX idx_session_expiry  ON session (expires_at);
+
+-- ---------- scheduled scans ----------
+--
+-- A schedule reads a path ON THE MACHINE RUNNING THIS PROCESS. That is the
+-- whole semantic, and it is why `runtime.in_container()` matters: a hosted
+-- instance has no desktop and no share, so a schedule there is a definition
+-- waiting for somewhere to run, not a job that is quietly working.
+-- `last_outcome` records which of those actually happened.
+
+CREATE TABLE scan_schedule (
+    id            INTEGER PRIMARY KEY,
+    account_id    INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    target_path   TEXT NOT NULL,
+    share_root    TEXT NOT NULL,
+    code_root     TEXT NOT NULL,
+    every_minutes INTEGER NOT NULL CHECK (every_minutes >= 5),
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    last_run_at   TEXT,
+    last_outcome  TEXT,
+    last_found    INTEGER NOT NULL DEFAULT 0,
+    last_analysed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (account_id, name)
+);
+
+CREATE INDEX idx_schedule_due ON scan_schedule (enabled, last_run_at);
 ```
 
 ## 5. The cross-team reuse constraint

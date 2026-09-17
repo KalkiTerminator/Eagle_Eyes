@@ -260,6 +260,11 @@ class PostgresDatabase:
                 raw.autocommit = True
 
     @staticmethod
+    def day_expr(column: str) -> str:
+        """TIMESTAMPTZ has no substr. See storage.Database.day_expr."""
+        return f"to_char({column}, 'YYYY-MM-DD')"
+
+    @staticmethod
     def encode_list(values) -> list:
         """TEXT[] takes a list. See storage.Database.encode_list."""
         return list(values)
