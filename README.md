@@ -69,6 +69,27 @@ with a role. That gap is the design, not an unfinished flow: signing in and bein
 something are different questions, and an account that has not been approved cannot produce an
 identity the data layer will accept.
 
+Once approved, three tabs:
+
+| Tab | Who | What |
+|---|---|---|
+| **Analyse** | everyone | Drop a bot folder, review what was found, analyse what you tick. Plus scheduled scans. |
+| **Analytics** | everyone | Trend, what fails most, confidence spread, how each failure was answered, feedback |
+| **Team** | managers, admins | Volume and spend per service line; bots worst first |
+
+**The Analyse tab takes a folder, not a file**, and that is the point: the browser sends every file
+with its relative path, the server rebuilds the tree, and `discovery.discover` reads it — the same
+function the scanner points at a real share. Service line and bot number come from the directory
+names rather than from log text, each screenshot is matched by the capture line in its own log, and
+two screenshots seconds apart still pair to neither. A test uploads the fixture estate and asserts
+the browser path and the CLI produce identical candidates; if they ever diverge there would be two
+sets of pairing rules in the product and only one of them tested.
+
+Rebuilding a client-supplied tree is a path-traversal hole taken literally, so `web/tree.py` refuses
+rather than sanitises, and an abandoned review's upload is deleted rather than kept.
+
+Charts are inline SVG rendered server-side — no chart library, no CDN, works with JavaScript off.
+
 | Role | Sees |
 |---|---|
 | admin | everything, plus approvals and the audit log |

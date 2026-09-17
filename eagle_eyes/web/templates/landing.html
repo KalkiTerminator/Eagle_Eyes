@@ -12,20 +12,20 @@
 </p>
 
 <div class="grid" style="margin:28px 0 8px">
-  <div class="stat"><div class="k">The input</div>
+  <div class="tile"><div class="k">The input</div>
     <div class="n">3</div>
     <div class="note">Log, screenshot and source, read together. Any one of them alone is a guess.</div></div>
-  <div class="stat"><div class="k">Repeat failures</div>
+  <div class="tile"><div class="k">Repeat failures</div>
     <div class="n">~95%</div>
     <div class="note">Deduplicated before a model is called at all — measured over 251 synthetic failures.</div></div>
-  <div class="stat"><div class="k">Cost of a repeat</div>
+  <div class="tile"><div class="k">Cost of a repeat</div>
     <div class="n">$0.00</div>
     <div class="note">A failure already diagnosed is answered from the store, not the provider.</div></div>
 </div>
 
 <h2 id="how">How it works</h2>
 
-<div class="panel">
+<div class="card">
   <h3>1 &middot; Correlate, don't summarise</h3>
   <p class="muted">
     A log says <code>ElementClickInterceptedException</code>. The screenshot shows
@@ -37,7 +37,7 @@
   </p>
 </div>
 
-<div class="panel">
+<div class="card">
   <h3>2 &middot; Deduplicate, because failures repeat</h3>
   <p class="muted">
     Failures are fingerprinted on what actually distinguishes them — the
@@ -53,7 +53,7 @@
   </p>
 </div>
 
-<div class="panel">
+<div class="card">
   <h3>3 &middot; Refuse to guess</h3>
   <p class="muted">
     Two screenshots sit within seconds of the failure: it attaches neither and
@@ -65,7 +65,7 @@
   </p>
 </div>
 
-<div class="panel">
+<div class="card">
   <h3>4 &middot; Access is enforced where the data is</h3>
   <p class="muted">
     Registration grants nothing: a new account can sign in and see nothing until

@@ -3,7 +3,7 @@
 {% block mainclass %}narrow{% endblock %}
 {% block body %}
 <h1>Analysing</h1>
-<div id="panel" class="panel">
+<div id="panel" class="card">
   <p class="muted">
     The model call runs on a worker rather than inside this request, so a slow
     provider cannot hold the page open or leave you retrying a call that is
@@ -24,7 +24,7 @@ async function poll() {
     document.getElementById('panel').innerHTML =
       '<div class="bad"><b>The analysis did not complete.</b> ' +
       new Option(j.error).innerHTML + '</div>' +
-      '<p><a class="btn ghost" href="/submit">Try again</a></p>';
+      '<p><a class="btn ghost" href="/app">Try again</a></p>';
   } else {
     setTimeout(poll, 900);
   }

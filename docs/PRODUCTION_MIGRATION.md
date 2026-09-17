@@ -33,9 +33,16 @@ policy. It holds because the scanner reads a share the reader could already reac
 
 Upload a screenshot through a web form and it is gone: the image is now bytes in an HTTP request, in
 a worker's memory, and — if anything is ever stored — on the server's disk. There *is* something to
-delete. The demo sidesteps this by never storing image bytes (`ingest.py` passes them to the engine
-and drops them, and `screenshot.processing_mode` is 0 by default), but the *structural* claim is
-gone the moment the transport changes.
+delete.
+
+**And the demo now uploads whole folders, which is a larger exposure than a single file, not a
+smaller one.** The Analyse tab rebuilds the dropped tree on the server's disk — logs, source and
+every screenshot — and holds it while the reviewer decides. Two things bound it, and both are
+deliberate: `screenshot.processing_mode` stays 0 so the image is never read or sent, and an
+abandoned review is swept after thirty minutes with its tree deleted. That is a retention policy in
+all but name, which is the point: Q3 and Q4 (how long, and who may view) are no longer questions a
+hosted instance can defer. The *structural* claim — that there is nothing to delete because nothing
+was copied — is gone the moment the transport changes.
 
 **What must change.** Decide, explicitly, whether a hosted instance accepts screenshot uploads at
 all. If it does, `SECURITY.md` §3 needs rewriting around a new premise, and Q3 and Q4 (retention and
@@ -131,11 +138,12 @@ the shares. **I would not.** It turns the service into something with a network 
 which is exactly the reach the jump server exists to prevent — and it inverts §1.3: now a compromise
 of the app reaches machines, not just stored data.
 
-Whichever is chosen, `pairing_method` stops being `uploaded` and goes back to `log_path` or
-`timestamp` — the scanner can see the sibling directory, so the pairing is verified rather than
-asserted. `code_mtime` comes back too, which means **reuse works again**: the demo refuses reuse
-because pasted code has no modification time to check against (`DATA_MODEL.md` §2.6), and that
-refusal costs a model call on every repeat.
+`pairing_method` is already `log_path` or `timestamp` rather than `uploaded` on the folder path:
+the uploaded tree has the sibling directories, so discovery verifies the pairing instead of
+asserting it, and refuses when two screenshots sit too close to the failure. What an on-prem
+scanner adds is not better pairing but **reach** — the estate's shares, without anyone dropping a
+folder into a browser — and a stable `code_mtime`, which is what the reuse gate needs
+(`DATA_MODEL.md` §2.6) to serve a stored answer instead of paying for a repeat.
 
 ---
 

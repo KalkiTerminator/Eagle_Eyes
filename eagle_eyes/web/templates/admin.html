@@ -7,19 +7,19 @@
 {% if error %}<div class="bad">{{ error }}</div>{% endif %}
 
 <div class="grid" style="margin:20px 0 26px">
-  <div class="stat"><div class="k">Spent, last 24h</div>
+  <div class="tile"><div class="k">Spent, last 24h</div>
     <div class="n">{{ spend_day|money }}</div>
     <div class="note">Read from committed analyses, not from a counter in this process.</div></div>
-  <div class="stat"><div class="k">Spent, lifetime</div>
+  <div class="tile"><div class="k">Spent, lifetime</div>
     <div class="n">{{ spend_total|money }}</div>
     <div class="note">What the lifetime cap is checked against before every call.</div></div>
-  <div class="stat"><div class="k">Model calls</div>
+  <div class="tile"><div class="k">Model calls</div>
     <div class="n">{% if kill_switch %}off{% else %}on{% endif %}</div>
     <div class="note">Flip EAGLE_EYES_DISABLE_MODEL to stop all spend without a redeploy.</div></div>
 </div>
 
 <h2>Accounts</h2>
-<div class="panel">
+<div class="card">
   <table>
     <tr><th>Email</th><th>Status</th><th>Role</th><th>Scope</th><th>Approve</th><th></th></tr>
     {% for a in accounts %}
@@ -72,7 +72,7 @@
 </div>
 
 <h2>Audit</h2>
-<div class="panel">
+<div class="card">
   <table>
     <tr><th>When</th><th>Actor</th><th>Action</th><th>Resource</th><th>Outcome</th></tr>
     {% for e in audit %}

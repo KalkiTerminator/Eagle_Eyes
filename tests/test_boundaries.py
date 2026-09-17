@@ -107,15 +107,53 @@ def test_no_test_is_defined_after_the_runner() -> None:
     """
     for path in sorted((ROOT / "tests").glob("test_*.py")):
         text = path.read_text(encoding="utf-8")
-        marker = text.find('if __name__ == "__main__"')
-        if marker == -1:
+        # Anchored to the start of a line, because this very test's docstring
+        # quotes the marker -- searching anywhere found the quote, decided
+        # everything below it was "after the runner", and failed on a file that
+        # was correctly ordered.
+        m = re.search(r'^if __name__ == "__main__"', text, re.M)
+        if m is None:
             check(f"{path.name} has a runner block", False)
             continue
-        after = text[marker:]
+        after = text[m.start():]
         stragglers = re.findall(r"^def (test_\w+)", after, re.M)
         check(f"{path.name}: nothing is defined after the runner",
               not stragglers, ", ".join(stragglers))
 
+
+def test_no_template_uses_a_class_the_stylesheet_does_not_define() -> None:
+    """Renaming a class in base.html silently unstyles every page that used it.
+
+    This happened: base.html was rewritten and `.panel` became `.card`,
+    `.stat` became `.tile`, and seven templates -- the landing page, sign-in,
+    registration, admin, the report, the job page -- kept referring to classes
+    that no longer existed. Every test passed, because they assert text content
+    and never presentation. The landing page is the first thing anyone sees.
+
+    So the grep that found it lives here now. It is deliberately crude: it
+    checks that a class named in a template appears somewhere in base.html's
+    stylesheet, not that the rule is correct. Crude is enough -- the failure
+    mode is a name that exists in one file and not the other.
+    """
+    templates = ROOT / "eagle_eyes" / "web" / "templates"
+    base = templates / "base.html"
+    if not base.is_file():
+        check("base.html exists", False)
+        return
+    stylesheet = base.read_text(encoding="utf-8")
+
+    # Classes set by JavaScript rather than markup, and Jinja-interpolated ones.
+    dynamic = {"on", "hot"}
+
+    for path in sorted(templates.glob("*.html")):
+        if path == base:
+            continue
+        used = set()
+        for attr in re.findall(r'class="([^"{}]+)"', path.read_text(encoding="utf-8")):
+            used.update(attr.split())
+        missing = sorted(c for c in used - dynamic if f".{c}" not in stylesheet)
+        check(f"{path.name}: every class it uses is styled", not missing,
+              ", ".join(missing))
 
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

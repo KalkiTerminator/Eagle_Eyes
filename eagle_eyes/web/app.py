@@ -20,7 +20,8 @@ import secrets
 import shutil
 import tempfile
 import threading
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,7 @@ from .auth import (
     APPROVED, REQUESTED, REVOKED, SUSPENDED, Account, AccountRepo, AuthError,
     SESSION_COOKIE, SessionRepo, bootstrap_from_env, read_cookie, sign_cookie,
 )
-from .ingest import IngestError, build_upload, discover_upload
+from .ingest import discover_upload, sniff_image
 from .jobs import JobQueue
 from .tree import UnsafePath, write_tree
 from .seed import already_seeded, seed_if_asked, seed_wanted
@@ -61,6 +62,20 @@ BACKEND_VAR = "EAGLE_EYES_BACKEND"
 # --------------------------------------------------------------------------
 # Process state
 # --------------------------------------------------------------------------
+
+# How long a review waits for a decision before its uploaded tree is deleted.
+# Long enough to read a table of two hundred rows and think about it; short
+# enough that a forgotten tab does not keep someone's logs on the server.
+REVIEW_TTL = timedelta(minutes=30)
+
+
+@dataclass
+class PendingReview:
+    email: str
+    root: Path
+    candidates: list
+    created_at: datetime
+
 
 class AppState:
     """One database, one queue, one signing key, for the life of the process."""
@@ -85,15 +100,57 @@ class AppState:
         self.environment = current_environment()
         bootstrap_from_env(self.db, self.env)
         self.seed_summary: dict | None = None
-        # Reviews awaiting a decision: token -> (owner email, temp root,
-        # candidates). Held in memory on purpose -- a review is a few minutes of
-        # someone's attention, not state worth a table, and the temp tree it
-        # points at does not survive a restart either.
-        self.pending: dict[str, tuple] = {}
+        # Reviews awaiting a decision: token -> PendingReview. Held in memory
+        # on purpose -- a review is a few minutes of someone's attention, not
+        # state worth a table, and the temp tree it points at does not survive
+        # a restart either.
+        #
+        # They EXPIRE. Someone who uploads a folder, reads the review table and
+        # closes the tab used to leave the whole tree on disk for the life of
+        # the process: client-derived content sitting on a server with nothing
+        # scheduled to remove it, which is the thing
+        # docs/PRODUCTION_MIGRATION.md 1.1 is about.
+        self.pending: dict[str, PendingReview] = {}
+        self._pending_lock = threading.Lock()
+
         self.schedules = ScheduleRunner(
             self.db, Principal(actor="scheduler", role=ADMIN),
             lambda schedule: _run_schedule(self, schedule))
         self._start_seeding()
+
+    def hold_review(self, token: str, email: str, root: Path,
+                    candidates: list) -> None:
+        with self._pending_lock:
+            self.pending[token] = PendingReview(
+                email=email, root=root, candidates=candidates,
+                created_at=datetime.now(timezone.utc))
+        self.sweep_reviews()
+
+    def peek_review(self, token: str, email: str) -> "PendingReview | None":
+        """Look at a review without claiming it. Expiry still applies."""
+        self.sweep_reviews()
+        with self._pending_lock:
+            held = self.pending.get(token)
+            return held if held is not None and held.email == email else None
+
+    def take_review(self, token: str, email: str) -> "PendingReview | None":
+        """Claim a review, or None if it has expired or is not theirs."""
+        self.sweep_reviews()
+        with self._pending_lock:
+            held = self.pending.get(token)
+            if held is None or held.email != email:
+                return None
+            return self.pending.pop(token)
+
+    def sweep_reviews(self) -> int:
+        """Drop expired reviews and delete the trees they were holding."""
+        cutoff = datetime.now(timezone.utc) - REVIEW_TTL
+        with self._pending_lock:
+            stale = [t for t, r in self.pending.items() if r.created_at < cutoff]
+            dropped = [self.pending.pop(t) for t in stale]
+        for review in dropped:
+            shutil.rmtree(review.root, ignore_errors=True)
+        return len(dropped)
 
     def _start_seeding(self) -> None:
         """Populate the demo on a worker, never on the boot path.
@@ -144,9 +201,9 @@ class AppState:
                                  self.environment)
         return Engine(backend, models_for(name),
                       budget=spend.guard_for(self.db, self.env),
-                      screenshot_mode=self._screenshot_mode())
+                      screenshot_mode=self.screenshot_mode())
 
-    def _screenshot_mode(self) -> int:
+    def screenshot_mode(self) -> int:
         raw = (self.env.get("EAGLE_EYES_SCREENSHOT_MODE") or "0").strip()
         try:
             mode = int(raw)
@@ -348,7 +405,7 @@ def create_app(db_path: Path | None = None,
                 "from those directory names rather than from the log text.")
 
         token = secrets.token_hex(16)
-        state.pending[token] = (account.email, root, candidates)
+        state.hold_review(token, account.email, root, candidates)
 
         seen, rows = set(), []
         for c in candidates:
@@ -376,15 +433,19 @@ def create_app(db_path: Path | None = None,
                        pick: list[int] = Form(default=[]),
                        account: Account = Depends(require_approved),
                        state: AppState = Depends(get_state)):
-        held = state.pending.get(token)
-        if not held or held[0] != account.email:
+        # PEEK for the guards, TAKE only once committed. Claiming the review
+        # first meant a kill switch, an hourly cap or a forgotten checkbox
+        # deleted the uploaded tree -- and a 251-file folder had to be dropped
+        # again because someone did not tick a box.
+        held = state.peek_review(token, account.email)
+        if held is None:
             raise HTTPException(status_code=404, detail="that review has expired")
-        _, root, candidates = held
 
         if spend.kill_switch_on(state.env):
             return _analyse_error(request, page, state, account,
                                   "Model calls are switched off by the kill "
-                                  "switch. Nothing was sent or charged.")
+                                  "switch. Nothing was sent or charged, and "
+                                  "your upload is still here.")
         cap = spend.hourly_analysis_cap(state.env)
         used = spend.analyses_this_hour(state.db, account.email)
         if used >= cap:
@@ -392,17 +453,20 @@ def create_app(db_path: Path | None = None,
                 request, page, state, account,
                 f"You have run {used} analyses in the last hour, which is the "
                 f"limit. It exists so one person cannot exhaust the budget for "
-                f"everyone.")
+                f"everyone. Your upload is still here.")
 
-        chosen = [candidates[i] for i in pick if 0 <= i < len(candidates)]
+        chosen = [held.candidates[i] for i in pick if 0 <= i < len(held.candidates)]
         if not chosen:
             return _analyse_error(request, page, state, account,
-                                  "Nothing was ticked, so nothing was sent.")
+                                  "Nothing was ticked, so nothing was sent. "
+                                  "Your upload is still here.")
 
-        state.pending.pop(token, None)
+        claimed = state.take_review(token, account.email)
+        if claimed is None:                       # expired between peek and take
+            raise HTTPException(status_code=404, detail="that review has expired")
         job = state.jobs.submit(
             "scan", account.email,
-            lambda: _analyse_candidates(state, account, chosen, root))
+            lambda: _analyse_candidates(state, account, chosen, claimed.root))
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
     # ------------------------------------------------------------ analytics
@@ -524,58 +588,6 @@ def create_app(db_path: Path | None = None,
         return RedirectResponse(f"/failures/{failure_id}", status_code=303)
 
     # --------------------------------------------------------------- upload
-
-    @app.get("/submit", response_class=HTMLResponse)
-    def submit_form(request: Request,
-                    account: Account = Depends(require_approved)):
-        return page(request, "submit.html", tab="analyse")
-
-    @app.post("/submit")
-    async def submit(request: Request,
-                     service_line: str = Form(...), bot_number: str = Form(...),
-                     log: UploadFile = None, code: UploadFile = None,
-                     screenshot: UploadFile = None,
-                     account: Account = Depends(require_approved),
-                     state: AppState = Depends(get_state)):
-        p = account.principal()
-
-        if spend.kill_switch_on(state.env):
-            # Checked HERE, before anything else, and not left to the budget
-            # guard. Engine.analyse deliberately never raises on model trouble
-            # -- it degrades to a zero-confidence fallback so one bad call
-            # cannot lose a batch. That is right for a provider hiccup and
-            # wrong for a kill switch: the operator would see a page full of
-            # "analysis did not complete" and no statement that they had turned
-            # it off themselves.
-            return page(request, "submit.html", tab="analyse",
-                        error="Model calls are switched off by the kill switch "
-                              "(EAGLE_EYES_DISABLE_MODEL). Nothing was sent and "
-                              "nothing was charged. Clear the variable to "
-                              "re-enable analysis.")
-
-        cap = spend.hourly_analysis_cap(state.env)
-        used = spend.analyses_this_hour(state.db, account.email)
-        if used >= cap:
-            return page(request, "submit.html", tab="analyse",
-                        error=f"You have run {used} analyses in the last hour, "
-                              f"which is the limit. This exists so one person "
-                              f"cannot exhaust the budget for everyone.")
-
-        try:
-            upload = build_upload(
-                service_line=service_line, bot_number=bot_number,
-                log_bytes=await _read(log, state),
-                code_bytes=await _read(code, state),
-                code_name=(code.filename if code else "") or "",
-                image_bytes=await _read(screenshot, state),
-                submitted_by=account.email)
-        except IngestError as exc:
-            return page(request, "submit.html", tab="analyse", error=str(exc))
-
-        job = state.jobs.submit(
-            "analyse", account.email,
-            lambda: _analyse_upload(state, p, upload, account))
-        return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_page(request: Request, job_id: str,
@@ -725,6 +737,24 @@ def _analyse_candidates(state: AppState, account: Account,
             bots.set_owner(bot_id, account.email)
             bots.set_team(bot_id, c.location.service_line)
 
+            # The screenshot is read ONLY when the policy permits it. Mode 0
+            # never opens the file -- the report links to where it sits and the
+            # reader's own permissions decide. This used to pass image=None
+            # unconditionally, so mode 3 silently did nothing on the main path:
+            # the same defect as a mode that claims to crop and does not.
+            image = None
+            if state.screenshot_mode() and c.screenshot_path and c.send_screenshot:
+                try:
+                    raw = Path(c.screenshot_path).read_bytes()
+                except OSError:
+                    raw = b""
+                # Checked from the file's own leading bytes before anything is
+                # sent. The paired file came out of an upload and is trusted
+                # only as far as its name -- forwarding arbitrary bytes to a
+                # provider as an image is not something to do on the strength
+                # of a .png extension.
+                image = raw if raw and sniff_image(raw) else None
+
             analysis = engine.analyse(
                 log_text=log_text, code_text=code_text,
                 code_path=str(c.code_path or ""),
@@ -733,7 +763,7 @@ def _analyse_candidates(state: AppState, account: Account,
                 code_stale=c.code_possibly_stale,
                 bot_label=c.location.label,
                 code_location=str(c.code_path or ""),
-                image=None)
+                image=image)
             if not analysis.fingerprint:
                 continue
 

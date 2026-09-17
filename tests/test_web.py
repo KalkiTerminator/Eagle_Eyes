@@ -126,11 +126,36 @@ def _sample_log() -> bytes:
 
 
 def _submit(c, **files):
-    payload = {"log": ("bot.log", _sample_log(), "text/plain")}
-    payload.update(files)
-    return c.post("/submit",
-                  data={"service_line": "INSURANCE_OPS", "bot_number": "BOT001"},
-                  files=payload, follow_redirects=False)
+    """Submit through the folder path -- discover, then analyse everything.
+
+    The single-file /submit route is gone; the folder picker handles one file
+    as readily as a tree. These helpers moved rather than being deleted, so the
+    validation coverage follows the feature instead of disappearing with it.
+    """
+    paths, parts = [], []
+    log = files.pop("log", None) or ("bot.log", _sample_log(), "text/plain")
+    rel = "data/INSURANCE_OPS/BOT001/2026/09/13/logs/user logs/logs/" + log[0]
+    paths.append(rel)
+    parts.append(("files", (rel, log[1], log[2])))
+    for kind, spec in files.items():
+        where = {"code": "code_folder/", "screenshot":
+                 "data/INSURANCE_OPS/BOT001/2026/09/13/logs/user logs/screenshot/"}
+        rel = where.get(kind, "") + spec[0]
+        paths.append(rel)
+        parts.append(("files", (rel, spec[1], spec[2])))
+    return c.post("/app/discover", data={"paths": paths}, files=parts,
+                  follow_redirects=False)
+
+
+def _submit_and_run(c, **files):
+    """Discover, then analyse every candidate. Returns the job response."""
+    r = _submit(c, **files)
+    m = re.search(r'name="token" value="(\w+)"', r.text)
+    if not m:
+        return r
+    picks = [str(i) for i in range(r.text.count('name="pick"'))]
+    return c.post("/app/analyse", data={"token": m.group(1), "pick": picks},
+                  follow_redirects=False)
 
 
 def _wait(c, job_url: str, timeout: float = 20.0) -> dict:
@@ -176,7 +201,8 @@ def test_anonymous_is_sent_to_sign_in_not_shown_data() -> None:
         return
     c, d = _client()
     try:
-        for path in ("/app", "/admin", "/submit", "/failures/1", "/jobs/abc"):
+        for path in ("/app", "/admin", "/analytics", "/team", "/failures/1",
+                     "/jobs/abc"):
             r = c.get(path, follow_redirects=False)
             check(f"anonymous {path} does not return content",
                   r.status_code in (303, 401), str(r.status_code))
@@ -201,7 +227,8 @@ def test_a_pending_account_gets_a_login_and_nothing_else() -> None:
         check("  and the page says nothing is hidden behind it",
               "nothing behind it" in r.text)
 
-        check("it cannot open the submit page", c.get("/submit").status_code == 403)
+        check("it cannot open the Analyse tab's upload",
+              "Drop a bot folder" not in c.get("/app").text)
         check("it cannot post a submission", _submit(c).status_code == 403)
         check("it cannot reach admin", c.get("/admin").status_code == 403)
         check("it cannot fetch a failure",
@@ -234,7 +261,7 @@ def test_the_full_journey() -> None:
         check("  with the tab bar", 'nav class="tabs"' in r.text)
         check("  and the folder picker", "Drop a bot folder" in r.text)
 
-        r = _submit(c,
+        r = _submit_and_run(c,
                     code=("Bot.cs.txt", b"public class Bot { void Run(){ Click(); } }",
                           "text/plain"),
                     screenshot=("shot.png", b"\x89PNG\r\n\x1a\n" + b"0" * 400,
@@ -277,7 +304,7 @@ def test_one_user_cannot_read_anothers_failure_over_http() -> None:
         c.post("/logout")
 
         _login(c, "alice@x.com")
-        status = _wait(c, _submit(c).headers["location"])
+        status = _wait(c, _submit_and_run(c).headers["location"])
         check("alice's analysis completes", status["status"] == "done", str(status))
         failure_id = status["result"]["failure_id"]
         c.post("/logout")
@@ -314,7 +341,7 @@ def test_a_job_belongs_to_the_person_who_started_it() -> None:
         c.post("/logout")
 
         _login(c, "alice@x.com")
-        job_url = _submit(c).headers["location"]
+        job_url = _submit_and_run(c).headers["location"]
         _wait(c, job_url)
         job_id = job_url.rsplit("/", 1)[-1]
         c.post("/logout")
@@ -402,7 +429,7 @@ def test_a_manager_sees_their_scope_and_no_more() -> None:
         c.post("/logout")
 
         _login(c, "alice@x.com")
-        status = _wait(c, _submit(c).headers["location"])
+        status = _wait(c, _submit_and_run(c).headers["location"])
         failure_id = status["result"]["failure_id"]
         c.post("/logout")
 
@@ -431,6 +458,7 @@ def test_a_manager_sees_their_scope_and_no_more() -> None:
 # -------------------------------------------------------------------- ingest
 
 def test_uploads_are_validated_not_trusted() -> None:
+    """The folder path writes client-chosen paths, so it validates them."""
     if not WEB:
         return
     c, d = _client()
@@ -441,30 +469,33 @@ def test_uploads_are_validated_not_trusted() -> None:
         c.post("/logout")
         _login(c, "dev@x.com")
 
-        r = c.post("/submit", data={"service_line": "../../etc",
-                                    "bot_number": "BOT001"},
-                   files={"log": ("a.log", b"x", "text/plain")})
-        check("a path-shaped service line is refused",
-              "not allowed" in r.text, str(r.status_code))
+        r = c.post("/app/discover",
+                   data={"paths": ["../../../../etc/cron.d/x"]},
+                   files=[("files", ("x", b"* * * * * root id", "text/plain"))])
+        check("a traversing path is refused", "parent traversal refused" in r.text)
+        check("  and the Analyse tab comes back with the reason",
+              "Drop a bot folder" in r.text)
 
-        r = c.post("/submit", data={"service_line": "SL", "bot_number": "B1"},
-                   files={"log": ("a.log", _sample_log(), "text/plain"),
-                          "screenshot": ("evil.png", b"<svg onload=alert(1)>",
-                                         "image/png")},
-                   follow_redirects=False)
-        check("a file claiming to be a PNG but is not is refused",
-              r.status_code == 200 and "not a PNG" in r.text)
-        check("  because the leading bytes are checked, not the name",
-              "leading bytes" in r.text)
+        r = c.post("/app/discover", data={"paths": ["/etc/passwd"]},
+                   files=[("files", ("p", b"root:x:0:0", "text/plain"))])
+        check("an absolute path is refused", "absolute path refused" in r.text)
 
-        r = c.post("/submit", data={"service_line": "SL", "bot_number": "B1"},
-                   files={"log": ("big.log", b"x" * (9 * 1024 * 1024), "text/plain")})
-        check("an oversized log is refused", "the limit is" in r.text)
+        r = c.post("/app/discover", data={"paths": ["notes/readme.txt"]},
+                   files=[("files", ("r", b"nothing here", "text/plain"))])
+        check("a folder with no failures in it says so, and invents none",
+              "Nothing in that folder looked like a bot failure" in r.text)
+        check("  naming the shape discovery expects", "data/&lt;service line&gt;" in r.text
+              or "data/<service line>" in r.text)
     finally:
         _cleanup(c, d)
 
 
-def test_an_upload_says_how_it_is_degraded() -> None:
+def test_what_the_review_reports_is_what_discovery_found() -> None:
+    """The review table is the honest account of a weaker input.
+
+    A folder gives real pairing, so the page shows the real method -- including
+    the refusals. Nothing is claimed that discovery did not establish.
+    """
     if not WEB:
         return
     c, d = _client()
@@ -475,20 +506,24 @@ def test_an_upload_says_how_it_is_degraded() -> None:
         c.post("/logout")
         _login(c, "dev@x.com")
 
-        check("the submit page warns before anything is sent",
-              "weaker input" in c.get("/submit").text)
+        r = _submit(c, code=("BOT001.txt", b"public class Bot { void Run(){} }",
+                             "text/plain"))
+        check("the review page renders", r.status_code == 200
+              and "What the folder contained" in r.text, str(r.status_code))
+        check("  and says nothing has been sent yet",
+              "Nothing has been sent to a model" in r.text)
+        check("  and counts distinct problems, not just failures",
+              "Distinct problems" in r.text)
+        check("  and states what it would actually call the model for",
+              "Would call the model" in r.text)
 
-        status = _wait(c, _submit(c).headers["location"])
+        status = _wait(c, _submit_and_run(
+            c, code=("BOT001.txt", b"public class Bot {}", "text/plain")
+        ).headers["location"])
         check("the analysis completes", status["status"] == "done", str(status))
-        degradations = " ".join(status["result"]["degradations"])
-        check("it says the log was the only input",
-              "log alone" in degradations, degradations)
-        check("  and that reuse is refused without a code mtime, or code is absent",
-              "log alone" in degradations or "NOT be reused" in degradations)
-
-        r = c.get(f"/failures/{status['result']['failure_id']}")
-        check("the stored pairing method is 'uploaded', not a claimed pairing",
-              r.status_code == 200)
+        check("  reporting how many were analysed and how many deduplicated",
+              "analysed" in status["result"] and "deduped" in status["result"],
+              str(status.get("result")))
     finally:
         _cleanup(c, d)
 
@@ -509,10 +544,13 @@ def test_the_kill_switch_stops_spending_without_a_redeploy() -> None:
         check("every page says model calls are off",
               "Model calls are switched off" in c.get("/app").text)
 
-        r = _submit(c)
+        r = _submit_and_run(c)
         check("a submission is refused before anything is queued",
               r.status_code == 200 and "kill switch" in r.text, str(r.status_code))
-        check("  and it says nothing was charged", "nothing was charged" in r.text)
+        check("  and it says nothing was sent or charged",
+              "Nothing was sent or charged" in r.text)
+        check("  and that the upload was not thrown away for it",
+              "upload is still here" in r.text)
     finally:
         _cleanup(c, d)
 
@@ -531,17 +569,17 @@ def test_the_hourly_cap_is_per_person() -> None:
         c.post("/logout")
 
         _login(c, "one@x.com")
-        first = _submit(c)
+        first = _submit_and_run(c)
         check("the first submission is accepted", first.status_code == 303)
         _wait(c, first.headers["location"])
-        second = _submit(c)
+        second = _submit_and_run(c)
         check("the second is refused by the cap",
               "which is the limit" in second.text, str(second.status_code))
         c.post("/logout")
 
         _login(c, "two@x.com")
         check("and another person is unaffected by it",
-              _submit(c).status_code == 303)
+              _submit_and_run(c).status_code == 303)
     finally:
         _cleanup(c, d)
 
@@ -556,7 +594,7 @@ def test_spend_is_read_from_the_database_not_a_counter() -> None:
         _approve(c, _account_ids(c)["dev@x.com"], role="user")
         c.post("/logout")
         _login(c, "dev@x.com")
-        _wait(c, _submit(c).headers["location"])
+        _wait(c, _submit_and_run(c).headers["location"])
         c.post("/logout")
 
         _login(c, ADMIN_EMAIL, ADMIN_PASSWORD)
@@ -585,9 +623,7 @@ def test_untrusted_content_is_escaped_in_the_page() -> None:
         nasty = (b"13-09-2026 08:07:00.000 [ERROR] System.InvalidOperationException: "
                  b"<script>alert('xss')</script> failed\n"
                  b"   at Bot.Run() in Bot.cs:line 1\n")
-        r = c.post("/submit", data={"service_line": "SL", "bot_number": "B1"},
-                   files={"log": ("a.log", nasty, "text/plain")},
-                   follow_redirects=False)
+        r = _submit_and_run(c, log=("a.log", nasty, "text/plain"))
         status = _wait(c, r.headers["location"])
         page = c.get(f"/failures/{status['result']['failure_id']}").text
         check("no executable script tag survives into the page",

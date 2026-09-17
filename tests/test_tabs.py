@@ -432,5 +432,119 @@ def test_a_disabled_schedule_does_not_run() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ------------------------------------------------- abandoned reviews
+
+def test_an_abandoned_review_does_not_keep_the_upload_forever() -> None:
+    """Upload a folder, read the table, close the tab.
+
+    The review used to be dropped only when someone clicked Analyse, so an
+    abandoned one left the whole tree on disk and in memory for the life of the
+    process -- client-derived content on a server with nothing scheduled to
+    remove it, which is exactly what docs/PRODUCTION_MIGRATION.md 1.1 warns
+    about. Uploading is a decision that document says to take deliberately;
+    leaving it there indefinitely is not a decision at all.
+    """
+    from datetime import datetime, timedelta, timezone
+    from eagle_eyes.web.app import create_app
+
+    d = Path(tempfile.mkdtemp())
+    app = create_app(d / "w.db", {"EAGLE_EYES_SECRET_KEY": "k" * 40,
+                                  "EAGLE_EYES_BACKEND": "mock"})
+    state = app.state.ee
+    try:
+        tree = Path(tempfile.mkdtemp())
+        (tree / "a.log").write_text("x")
+        state.hold_review("tok", "me@x.com", tree, ["candidate"])
+        check("the tree is held while the review is open", tree.exists())
+
+        check("the owner can look at it without claiming it",
+              state.peek_review("tok", "me@x.com") is not None)
+        check("  twice, because peeking is not taking",
+              state.peek_review("tok", "me@x.com") is not None)
+        check("nobody else can see it",
+              state.peek_review("tok", "other@x.com") is None)
+
+        state.pending["tok"].created_at = (datetime.now(timezone.utc)
+                                           - timedelta(hours=2))
+        check("an expired review is swept", state.sweep_reviews() == 1)
+        check("  its uploaded tree is deleted", not tree.exists())
+        check("  and the token no longer resolves",
+              state.peek_review("tok", "me@x.com") is None)
+        check("  nor can it be claimed",
+              state.take_review("tok", "me@x.com") is None)
+
+        fresh = Path(tempfile.mkdtemp())
+        state.hold_review("live", "me@x.com", fresh, ["c"])
+        check("a review inside its window survives the sweep",
+              state.sweep_reviews() == 0 and fresh.exists())
+        claimed = state.take_review("live", "me@x.com")
+        check("and claiming it hands over the same tree",
+              claimed is not None and claimed.root == fresh)
+        check("  removing it from the pending set",
+              state.peek_review("live", "me@x.com") is None)
+    finally:
+        state.schedules.stop()
+        state.db.close()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_screenshot_mode_means_something_on_the_folder_path() -> None:
+    """It used to pass image=None unconditionally.
+
+    So mode 3 silently did nothing on the main path -- a setting that claims to
+    send the screenshot and does not, which is the same defect as the modes
+    that claimed to crop. Mode 0 stays the default and still never opens the
+    file.
+    """
+    from eagle_eyes.web.app import AppState
+    from eagle_eyes.analysis import SCREENSHOT_MODES
+
+    d = Path(tempfile.mkdtemp())
+    try:
+        for value, expected in (("0", 0), ("3", 3), ("", 0),
+                                ("1", 0), ("2", 0), ("nonsense", 0), ("9", 0)):
+            state = AppState(d / f"m{value or 'none'}.db",
+                             {"EAGLE_EYES_SECRET_KEY": "k" * 40,
+                              "EAGLE_EYES_BACKEND": "mock",
+                              "EAGLE_EYES_SCREENSHOT_MODE": value})
+            try:
+                got = state.screenshot_mode()
+                check(f"mode {value!r} resolves to {expected}", got == expected, str(got))
+            finally:
+                state.schedules.stop()
+                state.db.close()
+
+        check("an unbuilt mode falls back to the one that sends nothing",
+              1 not in SCREENSHOT_MODES and 2 not in SCREENSHOT_MODES)
+
+        src = (ROOT / "eagle_eyes" / "web" / "app.py").read_text()
+        check("the folder path consults the mode before reading the file",
+              "if state.screenshot_mode() and c.screenshot_path" in src)
+        check("  and sniffs the bytes rather than trusting the extension",
+              "sniff_image(raw)" in src)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_paired_file_that_is_not_an_image_is_not_sent() -> None:
+    """The paired file came out of an upload and is trusted as far as its name.
+
+    Forwarding arbitrary bytes to a provider as an image on the strength of a
+    .png extension is not a thing to do.
+    """
+    from eagle_eyes.web.ingest import sniff_image
+
+    check("a real PNG is recognised", sniff_image(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+          == "image/png")
+    check("a JPEG is recognised", sniff_image(b"\xff\xd8\xff" + b"0" * 20) == "image/jpeg")
+    for label, raw in (("an SVG with a script", b"<svg onload=alert(1)>"),
+                       ("a shell script", b"#!/bin/sh\nrm -rf /"),
+                       ("a zip", b"PK\x03\x04"),
+                       ("empty", b""),
+                       ("plain text named .png", b"not an image at all")):
+        check(f"{label} is refused", sniff_image(raw) == "")
+
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))
