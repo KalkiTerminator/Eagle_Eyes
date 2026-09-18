@@ -115,6 +115,23 @@ def _status_of(c, email: str) -> str:
     return m.group(1) if m else "?"
 
 
+NOVEL_LOG = (
+    b"13-09-2026 08:07:00.000 [ERROR] Activity 'ResolveRemittanceAccount' failed\n"
+    b"13-09-2026 08:07:00.000 [ERROR] System.InvalidOperationException: "
+    b"Sequence contains no matching element\n"
+    b"   at System.Linq.Enumerable.First[TSource](IEnumerable`1 source, Func`2 predicate)\n"
+    b"   at iBot.Processes.Finance.AP_RemittancePosting.ResolveRemittanceAccount"
+    b"(String policyRef) in C:\\ibot\\processes\\Finance\\AP_RemittancePosting.cs:line 88\n"
+)
+"""A failure no pattern in the library answers.
+
+Used where a test needs the MODEL path specifically. The library now answers
+the selector and navigation failures the synthetic estate is full of, so a test
+that wants to prove the deep path works has to bring a failure the library does
+not know -- otherwise it silently starts asserting things about a template.
+"""
+
+
 def _sample_log() -> bytes:
     root = Path(__file__).resolve().parents[1] / "sandbox"
     logs = list(root.rglob("*.log")) if root.exists() else []
@@ -262,6 +279,7 @@ def test_the_full_journey() -> None:
         check("  and the folder picker", "Drop a bot folder" in r.text)
 
         r = _submit_and_run(c,
+                    log=("bot.log", NOVEL_LOG, "text/plain"),
                     code=("Bot.cs.txt", b"public class Bot { void Run(){ Click(); } }",
                           "text/plain"),
                     screenshot=("shot.png", b"\x89PNG\r\n\x1a\n" + b"0" * 400,
@@ -276,6 +294,15 @@ def test_the_full_journey() -> None:
         r = c.get(f"/failures/{failure_id}")
         check("the diagnosis renders", r.status_code == 200)
         check("  reusing the same report the CLI writes", "Root cause" in r.text)
+        # The evidence table is the part of the page that says what the answer
+        # was based on. Both of these were hard-coded empty in the hosted
+        # renderer, so every report showed a blank Exception row and claimed
+        # "log only" whatever it had read -- and nothing failed, because no
+        # test read the table.
+        check("  with the exception it was actually thrown from",
+              "InvalidOperationException" in r.text, "")
+        check("  and the inputs it was actually given",
+              "code" in r.text.lower() and "screenshot" in r.text.lower())
 
         r = c.post(f"/failures/{failure_id}/feedback",
                    data={"verdict": "wrong", "comment": "not it"},

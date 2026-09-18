@@ -269,6 +269,12 @@ class PostgresDatabase:
         """TEXT[] takes a list. See storage.Database.encode_list."""
         return list(values)
 
+    @staticmethod
+    def decode_list(value) -> tuple[str, ...]:
+        """TEXT[] comes back as a list. See storage.Database.decode_list."""
+        from .storage import Database
+        return Database.decode_list(value)
+
     def close(self) -> None:
         self.pool.close()
 

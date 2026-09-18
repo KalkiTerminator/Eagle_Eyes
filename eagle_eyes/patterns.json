@@ -1,0 +1,171 @@
+{
+  "_comment": [
+    "The known-pattern library: failures whose fix is already known, answered",
+    "without a model call. Loaded into the `pattern` table on boot; the table",
+    "is what the product reads, so a pattern can be deactivated there without",
+    "a redeploy.",
+    "",
+    "A rule matches only when the exception class AND the message agree. The",
+    "exception alone is never enough: TimeoutException and",
+    "WebDriverTimeoutException mean different things and want different fixes.",
+    "`exception_any` is matched against the CLASS NAME -- the segment after the",
+    "last dot -- exactly, not as a substring, for the same reason.",
+    "`exclude_any` disqualifies a match outright; it is how a pattern says",
+    "'this looks like me but is not'.",
+    "",
+    "Every fix is written for C#/.NET and Selenium WebDriver, which is what the",
+    "estate runs. A fix phrased in requests/urllib3 terms reads as obviously",
+    "wrong to the developer receiving it, and a wrong-looking fix costs the",
+    "whole system its credibility faster than no fix at all."
+  ],
+
+  "patterns": [
+    {
+      "name": "timeout",
+      "failure_type": "timeout",
+      "severity": "high",
+      "match_rule": {
+        "exception_any": ["TaskCanceledException", "TimeoutException",
+                          "OperationCanceledException", "WebException"],
+        "message_any": ["the operation has timed out", "timed out",
+                        "httpclient.timeout", "the request was canceled",
+                        "timeout period elapsed"],
+        "exclude_any": ["unable to locate element", "no such element",
+                        "element not interactable"]
+      },
+      "root_cause": "A call to an external system did not answer inside the configured timeout. The usual cause is a timeout tuned against a healthy service and never revisited for the service under load -- HttpClient.Timeout defaults to 100 seconds, and a Timeout set on the request rather than the client is silently ignored.",
+      "suggested_fix": "Set the timeout on the HttpClient instance (or on the IHttpClientFactory registration), not per-request, and raise it to cover the service's p99 rather than its median. Add a Polly retry around transient failures -- HttpPolicyExtensions.HandleTransientHttpError().Or<TaskCanceledException>().WaitAndRetryAsync(3, i => TimeSpan.FromSeconds(Math.Pow(2, i))) -- so one slow response does not end the run.",
+      "affected_function": ""
+    },
+    {
+      "name": "selector_not_found",
+      "failure_type": "selector",
+      "severity": "high",
+      "match_rule": {
+        "exception_any": ["NoSuchElementException", "ElementNotInteractableException",
+                          "StaleElementReferenceException", "ElementClickInterceptedException",
+                          "WebDriverTimeoutException"],
+        "message_any": ["no such element", "unable to locate element",
+                        "element not interactable", "stale element reference",
+                        "element click intercepted", "element is not clickable",
+                        "timed out after", "waiting for element"],
+        "exclude_any": []
+      },
+      "root_cause": "The locator no longer matches anything on the page. Nearly always the application was updated and the element moved, was renamed, or is now rendered after the point at which the bot looked for it -- a brittle XPath survives far less than an id or a data attribute.",
+      "suggested_fix": "Replace the bare FindElement with an explicit wait: new WebDriverWait(driver, TimeSpan.FromSeconds(15)).Until(ExpectedConditions.ElementToBeClickable(by)). Re-record the locator against a stable id or data-* attribute rather than a positional XPath, and re-find the element immediately before interacting with it so a re-render cannot leave a stale reference behind. Never use Thread.Sleep in place of a wait -- it makes the bot slower and no more reliable.",
+      "affected_function": ""
+    },
+    {
+      "name": "auth_expired",
+      "failure_type": "auth",
+      "severity": "critical",
+      "match_rule": {
+        "exception_any": ["HttpRequestException", "AuthenticationException",
+                          "UnauthorizedAccessException", "SecurityException",
+                          "MsalUiRequiredException", "WebException"],
+        "message_any": ["401", "unauthorized", "invalid_grant", "token expired",
+                        "expired credentials", "access denied", "authentication failed"],
+        "exclude_any": ["429", "too many requests"]
+      },
+      "root_cause": "The service rejected the bot's credentials. Either a password or client secret has expired or been rotated, or a bearer token was cached past its lifetime and reused.",
+      "suggested_fix": "Move the credential out of app.config and into the estate's secret store, read at run time rather than at build time. Where a token is involved, refresh it on expiry instead of caching it for the life of the process, and retry the request once on a 401 after re-authenticating -- but only once, so a genuinely revoked credential fails loudly rather than looping. If this bot uses a service account, check its rotation date against the failure timestamp before changing any code.",
+      "affected_function": ""
+    },
+    {
+      "name": "network_error",
+      "failure_type": "network",
+      "severity": "high",
+      "match_rule": {
+        "exception_any": ["SocketException", "HttpRequestException", "WebException",
+                          "IOException"],
+        "message_any": ["connection reset", "actively refused", "connection refused",
+                        "no such host is known", "name or service not known",
+                        "unable to connect to the remote server",
+                        "an existing connection was forcibly closed"],
+        "exclude_any": ["certificate", "ssl", "tls"]
+      },
+      "root_cause": "The connection failed at the network layer -- reset, refused, or the host did not resolve. On an estate behind a jump server this is usually the target being down or a firewall or proxy rule, not the bot.",
+      "suggested_fix": "Confirm the target service is up and reachable from the machine the bot runs on before changing code -- Test-NetConnection <host> -Port <port> from that host settles it in one command. If the failure is intermittent, wrap the call in a Polly retry with exponential backoff and jitter so a transient reset does not end the run. If the host does not resolve at all, the fix is a DNS or proxy configuration change, not a code change.",
+      "affected_function": ""
+    },
+    {
+      "name": "browser_navigation_failed",
+      "failure_type": "network",
+      "severity": "high",
+      "match_rule": {
+        "exception_any": ["WebDriverException", "InvalidOperationException"],
+        "message_any": ["net::err_connection_timed_out", "net::err_connection_refused",
+                        "net::err_name_not_resolved", "net::err_internet_disconnected",
+                        "net::err_connection_reset", "net::err_address_unreachable"],
+        "exclude_any": ["net::err_cert"]
+      },
+      "root_cause": "The browser could not reach the application at all -- the navigation itself failed, before any element was looked for. The bot is working; the target site, the network path to it, or name resolution is not. Chrome reports this as a net:: error inside a generic WebDriverException, which is why it reads like a driver problem and is not one.",
+      "suggested_fix": "Check the target URL from the machine the bot runs on before touching the code: Test-NetConnection <host> -Port 443, and open the same URL in a browser on that host. An internal site behind a proxy usually fails this way when the Chrome instance the driver starts does not inherit the proxy settings -- set them explicitly on the ChromeOptions (options.AddArgument($\"--proxy-server={proxy}\")) rather than relying on the system configuration. If the site is genuinely down, the correct behaviour is to fail the run fast with the host named, not to retry the navigation for ten minutes.",
+      "affected_function": ""
+    },
+    {
+      "name": "file_not_found",
+      "failure_type": "file_io",
+      "severity": "medium",
+      "match_rule": {
+        "exception_any": ["FileNotFoundException", "DirectoryNotFoundException",
+                          "IOException", "UnauthorizedAccessException"],
+        "message_any": ["could not find file", "could not find a part of the path",
+                        "does not exist", "the system cannot find the file",
+                        "the system cannot find the path"],
+        "exclude_any": []
+      },
+      "root_cause": "An input file or folder was not where the bot expected it. On a network share this is as often a mapped drive that did not reconnect, or an upstream job that had not finished writing, as a wrong path.",
+      "suggested_fix": "Check the path with File.Exists / Directory.Exists before reading and fail with a message naming the full path, so the next occurrence diagnoses itself. Use a UNC path rather than a mapped drive letter -- a mapped drive is per-session and an unattended run may not have it. Where an upstream job produces the file, wait for it with a bounded poll rather than assuming it is ready when the bot starts.",
+      "affected_function": ""
+    },
+    {
+      "name": "rate_limited",
+      "failure_type": "rate_limit",
+      "severity": "medium",
+      "match_rule": {
+        "exception_any": ["HttpRequestException", "WebException",
+                          "RateLimitExceededException"],
+        "message_any": ["429", "too many requests", "rate limit", "retry-after",
+                        "throttled", "request limit exceeded"],
+        "exclude_any": []
+      },
+      "root_cause": "The target API refused the call because the bot is sending more requests than its quota allows. This usually appears after a volume increase rather than after a code change.",
+      "suggested_fix": "Read the Retry-After header and honour it rather than retrying immediately -- Polly's WaitAndRetryAsync overload that takes the response can do this directly. Add client-side pacing between calls in the batch loop, and reduce the degree of parallelism if the loop uses Parallel.ForEach or Task.WhenAll over the whole set. If the quota is genuinely too small for the volume, that is a conversation with the API owner, not a retry policy.",
+      "affected_function": ""
+    },
+    {
+      "name": "data_validation",
+      "failure_type": "data_validation",
+      "severity": "medium",
+      "match_rule": {
+        "exception_any": ["FormatException", "ArgumentException", "ArgumentNullException",
+                          "JsonException", "JsonReaderException", "InvalidCastException",
+                          "HttpRequestException"],
+        "message_any": ["422", "unprocessable", "input string was not in a correct format",
+                        "is not a valid", "value cannot be null",
+                        "required field", "validation failed"],
+        "exclude_any": []
+      },
+      "root_cause": "The bot was given data it could not use -- a missing field, a value in the wrong format, or a type it did not expect. The failure surfaces where the value is finally used, which is usually a long way from where it was read.",
+      "suggested_fix": "Validate at intake rather than at submission: check the required columns and parse the typed values as the row is read, using decimal.TryParse and DateTime.TryParseExact with the expected format and culture rather than Parse. Log the offending row identifier and skip it so one bad record does not end the run, and report the skipped rows at the end. CultureInfo is worth checking specifically -- a date or decimal that parses on a developer machine and not on the runner is a culture mismatch, not bad data.",
+      "affected_function": ""
+    },
+    {
+      "name": "ssl_error",
+      "failure_type": "ssl",
+      "severity": "critical",
+      "match_rule": {
+        "exception_any": ["AuthenticationException", "HttpRequestException",
+                          "WebException", "SecurityException"],
+        "message_any": ["certificate", "ssl", "tls", "remotecertificatenamemismatch",
+                        "trust relationship", "could not establish trust relationship",
+                        "the remote certificate is invalid"],
+        "exclude_any": []
+      },
+      "root_cause": "The TLS handshake failed because the certificate could not be validated -- expired, self-signed, the wrong name, or a corporate proxy re-signing traffic with a CA the machine does not trust.",
+      "suggested_fix": "Find out which of those it is before changing code: openssl s_client -connect <host>:443 from the machine that failed shows the chain it is actually offered. If a proxy is re-signing, the fix is to install the proxy's CA in the machine's trust store, not in the bot. Never set ServerCertificateCustomValidationCallback to return true -- it turns a loud certificate failure into a silent acceptance of any certificate, including an attacker's, and it will outlive whoever added it.",
+      "affected_function": ""
+    }
+  ]
+}

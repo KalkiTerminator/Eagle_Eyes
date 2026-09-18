@@ -39,5 +39,5 @@ build-backend = "setuptools.build_meta"
 packages = ["eagle_eyes", "eagle_eyes.web"]
 
 [tool.setuptools.package-data]
-eagle_eyes = ["schema.sql", "schema_pg.sql", "prompts/*.txt", "prompts/*.json"]
+eagle_eyes = ["schema.sql", "schema_pg.sql", "patterns.json", "prompts/*.txt", "prompts/*.json"]
 "eagle_eyes.web" = ["templates/*.html", "static/*"]

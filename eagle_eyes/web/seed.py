@@ -92,19 +92,25 @@ def seed(db, engine_factory, *, real_analyses: int = DEFAULT_REAL_ANALYSES) -> d
     devs = DeveloperRepo(db, p)
     devs.ensure(DEMO_OWNER, display_name="Demo")
 
+    engine = engine_factory()
+
     # TWO PASSES, and the reason is the whole demonstration.
     #
-    # Fingerprint everything first, then spend the analysis budget on the
-    # fingerprints with the MOST occurrences. Analysing whichever failures
-    # happen to come first spends six calls on six one-off problems and leaves
-    # the two-hundred-failure spike -- the case the product exists for --
-    # showing as unanalysed. Same budget, and the difference between a home
-    # page that proves the argument and one that undercuts it.
-    prints = _fingerprint_all(candidates)
-    ranked = sorted(prints.items(), key=lambda kv: len(kv[1]), reverse=True)
-    chosen = {h for h, _ in ranked[:real_analyses]}
-
-    engine = engine_factory()
+    # Fingerprint everything first, then decide where the analysis budget goes.
+    # Analysing whichever failures happen to come first spends six calls on six
+    # one-off problems and leaves the two-hundred-failure spike -- the case the
+    # product exists for -- showing as unanalysed.
+    #
+    # The budget is only spent on fingerprints the known-pattern library does
+    # NOT answer. A template costs nothing, so every failure the library covers
+    # is answered regardless; ranking by occurrence alone would spend all six
+    # calls on the biggest spikes, which are exactly the ones already free, and
+    # leave the failures that genuinely need a model showing as pending. The
+    # remaining budget goes to the most frequent of those.
+    prints, free = _fingerprint_all(candidates, getattr(engine, "library", None))
+    ranked = sorted(((h, paths) for h, paths in prints.items() if h not in free),
+                    key=lambda kv: len(kv[1]), reverse=True)
+    chosen = free | {h for h, _ in ranked[:real_analyses]}
     seen: dict[str, int] = {}
     summary = {"failures": 0, "analysed": 0, "deduped": 0, "unanalysed": 0,
                "cost_usd": 0.0, "fingerprints": len(prints)}
@@ -143,20 +149,30 @@ def _load_generator():
     return module.generate
 
 
-def _fingerprint_all(candidates) -> dict[str, list]:
-    """Every candidate's fingerprint, grouped. Free -- no model is involved."""
+def _fingerprint_all(candidates, library=None) -> tuple[dict[str, list], set[str]]:
+    """Every candidate's fingerprint, grouped, and which the library answers.
+
+    Both are free -- no model is involved in either. Knowing which fingerprints
+    a template covers is what lets the analysis budget go where it is actually
+    needed.
+    """
     from ..discovery import read_text
     from ..fingerprint import fingerprint
     from ..sanitize import sanitize_log
 
     out: dict[str, list] = {}
+    free: set[str] = set()
     for candidate in candidates:
         result = fingerprint(sanitize_log(read_text(candidate.log_path)).text,
                              str(candidate.code_path or ""))
         if result is None:
             continue
-        out.setdefault(result[0], []).append(candidate.log_path)
-    return out
+        fp_hash, failure = result
+        out.setdefault(fp_hash, []).append(candidate.log_path)
+        if library is not None and library.match(failure.exception_type,
+                                                 failure.message):
+            free.add(fp_hash)
+    return out, free
 
 
 def prints_of(prints: dict[str, list], candidate) -> str | None:

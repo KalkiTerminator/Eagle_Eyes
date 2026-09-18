@@ -289,6 +289,45 @@ def test_a_database_made_before_the_taxonomy_is_upgraded_in_place() -> None:
         db.pool.close()
 
 
+def test_the_pattern_library_round_trips_through_jsonb() -> None:
+    """`match_rule` is TEXT in SQLite and JSONB in PostgreSQL.
+
+    psycopg decodes JSONB for you and hands back a dict; sqlite3 hands back the
+    string. The same `json.loads(row["match_rule"])` therefore works on one
+    dialect and raises TypeError on the other -- and only on the deployed
+    instance, because the whole SQLite suite is green either way. That is the
+    shape of nearly every bug this file exists to catch.
+    """
+    if not DSN:
+        check("live JSONB check skipped -- set EAGLE_EYES_TEST_DSN", True)
+        return
+
+    import psycopg
+    from eagle_eyes.storage_pg import PostgresDatabase
+    from eagle_eyes.storage import PatternRepo, Principal, ADMIN
+    from eagle_eyes.patterns import PatternLibrary
+
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("DROP SCHEMA public CASCADE")
+        c.execute("CREATE SCHEMA public")
+
+    db = PostgresDatabase(DSN, max_size=2)
+    try:
+        repo = PatternRepo(db, Principal("root@x.com", ADMIN))
+        shipped = PatternLibrary.from_file()
+        check("the library loads into PostgreSQL", repo.sync() == len(shipped))
+        lib = repo.library()
+        check("and reads back as the same matcher, in the same order",
+              lib.names() == shipped.names(), str(lib.names()))
+        got = lib.match("OpenQA.Selenium.NoSuchElementException",
+                        "Unable to locate element")
+        check("a match works against a JSONB rule",
+              got is not None and got.name == "selector_not_found",
+              got.name if got else "no match")
+    finally:
+        db.pool.close()
+
+
 def test_against_a_real_server() -> None:
     if not DSN:
         check("live PostgreSQL checks skipped -- set EAGLE_EYES_TEST_DSN", True,

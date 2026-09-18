@@ -498,6 +498,27 @@ class Database:
         """
         return json.dumps(list(values))
 
+    @staticmethod
+    def decode_list(value) -> tuple[str, ...]:
+        """The inverse of `encode_list`, for whichever dialect wrote it.
+
+        Tolerant of both because a row can outlive a migration between them:
+        SQLite hands back the JSON string, PostgreSQL hands back a list, and
+        `json.loads` on the list raises. Anything unreadable becomes empty
+        rather than raising -- `inputs_used` decorates a report, and a report
+        that will not render because a list did not parse is a worse outcome
+        than one that says "log only".
+        """
+        if not value:
+            return ()
+        if isinstance(value, (list, tuple)):
+            return tuple(str(v) for v in value)
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return ()
+        return tuple(str(v) for v in decoded) if isinstance(decoded, list) else ()
+
     def close(self) -> None:
         """Close every thread's connection, not just this thread's."""
         with self._lock:
@@ -591,6 +612,72 @@ class BotRepo(Repository):
         team_id = DeveloperRepo(self.db, self.p)._team_id(team)
         self.db.conn.execute("UPDATE bot SET team_id=? WHERE id=?", (team_id, bot_id))
         self._audit("set_team", "bot", bot_id)
+
+
+class PatternRepo(Repository):
+    """The known-pattern library, in the database.
+
+    The library ships as eagle_eyes/patterns.json, but the TABLE is what the
+    product reads. That is the point of `sync()`: an estate can deactivate a
+    pattern, or correct a fix that turned out to be wrong for its environment,
+    without waiting for a release. A pattern answers real failures without a
+    model call and without review, so being able to switch one off in seconds
+    matters more than it would for anything else here.
+    """
+
+    def sync(self, patterns=None) -> int:
+        """Load the shipped library into the table. Idempotent.
+
+        An existing row's `is_active` is left alone -- it is the one field an
+        operator sets, and a deploy that silently switched a disabled pattern
+        back on would undo a decision somebody made deliberately.
+        """
+        from .patterns import PatternLibrary, to_row
+        if patterns is None:
+            patterns = PatternLibrary.from_file().patterns
+        n = 0
+        for pattern in patterns:
+            row = to_row(pattern)
+            cur = self.db.conn.execute("SELECT id FROM pattern WHERE name=?",
+                                       (row["name"],))
+            existing = cur.fetchone()
+            if existing:
+                self.db.conn.execute(
+                    "UPDATE pattern SET match_rule=?, response_template=?,"
+                    " severity=? WHERE id=?",
+                    (row["match_rule"], row["response_template"], row["severity"],
+                     existing["id"]))
+            else:
+                self.db.conn.execute(
+                    "INSERT INTO pattern(name, match_rule, response_template, severity)"
+                    " VALUES (?,?,?,?)",
+                    (row["name"], row["match_rule"], row["response_template"],
+                     row["severity"]))
+                n += 1
+        self._audit("sync", "pattern", "library")
+        return n
+
+    def active(self) -> list[sqlite3.Row]:
+        """In insertion order, which is the order the library file declares.
+
+        Order is load-bearing: the first match wins, so a narrow pattern has to
+        be able to sit ahead of a broad one.
+        """
+        return list(self.db.conn.execute(
+            "SELECT * FROM pattern WHERE is_active = TRUE ORDER BY id"))
+
+    def all(self) -> list[sqlite3.Row]:
+        return list(self.db.conn.execute("SELECT * FROM pattern ORDER BY id"))
+
+    def set_active(self, name: str, active: bool) -> None:
+        self.db.conn.execute("UPDATE pattern SET is_active=? WHERE name=?",
+                             (bool(active), name))
+        self._audit("activate" if active else "deactivate", "pattern", name)
+
+    def library(self):
+        """The active patterns, compiled into a matcher."""
+        from .patterns import from_rows
+        return from_rows(self.active())
 
 
 class FingerprintRepo(Repository):
@@ -708,8 +795,10 @@ class FailureRepo(Repository):
 
     SELECT_ = ("SELECT f.*, b.service_line, b.bot_number, b.owner_dev_id,"
                " a.root_cause, a.confidence, a.suggested_fix, a.path, a.model_id,"
-               " a.failure_type, a.severity, a.affected_function, a.recommendations"
+               " a.failure_type, a.severity, a.affected_function, a.recommendations,"
+               " a.inputs_used, fp.exception_type, fp.normalized_message"
                " FROM failure f JOIN bot b ON b.id=f.bot_id"
+               " JOIN fingerprint fp ON fp.id=f.fingerprint_id"
                " LEFT JOIN analysis a ON a.id=f.analysis_id")
 
     def _scope_sql(self) -> tuple[str, list[Any]]:

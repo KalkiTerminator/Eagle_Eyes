@@ -169,6 +169,55 @@ TEMPLATES = [
         "activity": "ReadRange",
         "vision": False,
     },
+
+    # The three below are NOVEL by construction: no entry in
+    # eagle_eyes/patterns.json matches them, so they take the model path and the
+    # diagnosis needs the CODE, not just the log. Without them the synthetic
+    # estate is answered end to end by the known-pattern library -- which makes
+    # the library look better than it is and never exercises the path the
+    # product actually exists for. A test asserts they stay unmatched.
+    {
+        "key": "logic_error",
+        "exc": "System.InvalidOperationException",
+        "msg": "Sequence contains no matching element",
+        "activity": "ResolveRemittanceAccount",
+        "vision": False,
+        "browser": False,
+        "stack": [
+            "   at System.Linq.Enumerable.First[TSource](IEnumerable`1 source, Func`2 predicate)",
+            "   at iBot.Processes.{ns}.{proc}.{act}(String policyRef) in C:\\ibot\\processes\\{ns}\\{proc}.cs:line {l1}",
+            "   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\\build\\ibot\\src\\Runtime\\Engine.cs:line {l2}",
+        ],
+    },
+    {
+        "key": "queue_contention",
+        "exc": "System.AggregateException",
+        "msg": ("One or more errors occurred. (Queue item {batch} is already locked by "
+                "VM-CLA-{x}; lease expires in 00:04:12)"),
+        "activity": "ClaimQueueItem",
+        "vision": False,
+        "browser": False,
+        "stack": [
+            "   at System.Threading.Tasks.Task.ThrowIfExceptional(Boolean includeTaskCanceledExceptions)",
+            "   at iBot.Runtime.QueueClient.LeaseAsync(Int64 itemId, TimeSpan lease)",
+            "   at iBot.Processes.{ns}.{proc}.{act}(Int64 itemId) in C:\\ibot\\processes\\{ns}\\{proc}.cs:line {l1}",
+            "   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\\build\\ibot\\src\\Runtime\\Engine.cs:line {l2}",
+        ],
+    },
+    {
+        "key": "ledger_imbalance",
+        "exc": "iBot.Processes.Finance.LedgerOutOfBalanceException",
+        "msg": ("Remittance total 48,210.55 does not match the sum of {batch} posted lines "
+                "(delta 90.00). Posting rolled back."),
+        "activity": "CommitRemittanceBatch",
+        "vision": False,
+        "browser": False,
+        "stack": [
+            "   at iBot.Processes.Finance.LedgerValidator.AssertBalanced(RemittanceBatch batch)",
+            "   at iBot.Processes.{ns}.{proc}.{act}(RemittanceBatch batch) in C:\\ibot\\processes\\{ns}\\{proc}.cs:line {l1}",
+            "   at iBot.Runtime.Engine.RunProcess(ProcessDefinition def, QueueItem item) in C:\\build\\ibot\\src\\Runtime\\Engine.cs:line {l2}",
+        ],
+    },
 ]
 
 STACK = [
@@ -199,10 +248,14 @@ def make_log(rng: random.Random, tpl: dict, bot: str, sl: str, when: datetime,
         batch=rng.randint(1000, 9999),
         ref=f"{rng.randrange(16**12):012X}",
     )
+    # A template may bring its own frames. A ledger imbalance thrown inside a
+    # validator has no Selenium in its stack, and giving it one would teach the
+    # fingerprinter and the model that every failure in the estate is a browser
+    # failure -- which is the assumption the novel path exists to break.
     stack = "\n".join(
         f.format(ns=ns, proc=proc, act=tpl["activity"],
                  l1=rng.randint(40, 140), l2=rng.randint(500, 700))
-        for f in STACK
+        for f in tpl.get("stack", STACK)
     )
     ts = lambda d: (when + timedelta(seconds=d)).strftime("%d-%m-%Y %H:%M:%S.%f")[:-3]
     head = "\n".join([
@@ -233,7 +286,7 @@ def make_log(rng: random.Random, tpl: dict, bot: str, sl: str, when: datetime,
         f"{head}\n"
         f"{ts(0)} [ERROR] Activity '{tpl['activity']}' failed\n"
         f"{ts(0)} [ERROR] {tpl['exc']}: {msg}\n"
-        f"  (Session info: chrome={chrome})\n"
+        + (f"  (Session info: chrome={chrome})\n" if tpl.get("browser", True) else "") +
         f"{stack}\n"
         f"{shot_line}"
         f"{ts(2)} [INFO ] Run terminated with status FAILED\n"

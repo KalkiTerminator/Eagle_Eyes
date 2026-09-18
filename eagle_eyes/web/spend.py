@@ -35,7 +35,12 @@ HOURLY_ANALYSES_VAR = "EAGLE_EYES_HOURLY_ANALYSES"
 DEFAULT_DAILY = 2.00
 DEFAULT_TOTAL = 25.00
 DEFAULT_PER_RUN = 0.50
-DEFAULT_SINGLE_CALL = 0.05
+# Above analysis.DEEP_PROJECTION_USD, and that is the whole requirement: at
+# 0.05 this sat BELOW the $0.06 a deep call is projected at, so every deep
+# analysis on the hosted instance was refused before it was attempted -- the
+# user saw "single call projected at $0.0600, cap is $0.05" and no diagnosis,
+# with a valid key and an untouched budget. A test now ties the two together.
+DEFAULT_SINGLE_CALL = 0.10
 DEFAULT_HOURLY_ANALYSES = 20
 
 

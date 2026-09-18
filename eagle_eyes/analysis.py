@@ -26,6 +26,7 @@ from pathlib import Path
 from .cache import CachedAnalysis, SharedCache
 from .fingerprint import Failure, fingerprint
 from .model_gateway import Backend, BudgetGuard, ModelReply, Usage
+from .patterns import TEMPLATE_CONFIDENCE, PatternLibrary
 from .sanitize import sanitize_code, sanitize_log
 
 # The screenshot policy modes that EXIST. docs/SECURITY.md section 7 designs
@@ -61,6 +62,19 @@ FAILURE_TYPES = {
 SEVERITIES = ("low", "medium", "high", "critical")
 
 PROMPTS = Path(__file__).parent / "prompts"
+
+# What a call is ASSUMED to cost, for the budget check that happens before it is
+# made. The real figure is not knowable then -- the token counts come back with
+# the reply -- so these are deliberate over-estimates: a deep call on Sonnet 5
+# carrying a log excerpt, the code and a screenshot works out near $0.03 at
+# $2/$10 per MTok. Over-estimating makes the cap slightly conservative;
+# under-estimating would let through exactly the call the cap exists to stop.
+#
+# A cap set BELOW the deep projection refuses every deep analysis before it is
+# attempted, whatever the key or the balance -- so the hosted defaults in
+# web/spend.py are checked against these by a test rather than by eye.
+TRIAGE_PROJECTION_USD = 0.01
+DEEP_PROJECTION_USD = 0.06
 
 # Caps keep one runaway log from blowing the context window and the budget.
 LOG_EXCERPT_CHARS = 12_000
@@ -238,6 +252,7 @@ class Engine:
                  cache: SharedCache | None = None,
                  screenshot_mode: int = 0,
                  client_patterns: dict[str, str] | None = None,
+                 library: PatternLibrary | None = None,
                  reuse_ttl_days: int = 30) -> None:
         self.backend = backend
         self.models = models
@@ -253,7 +268,7 @@ class Engine:
         self.screenshot_mode = screenshot_mode
         self.client_patterns = client_patterns or {}
         self.reuse_ttl = timedelta(days=reuse_ttl_days)
-        self.templates: dict[str, str] = {}
+        self.library = library if library is not None else PatternLibrary.empty()
 
     # -- stages ------------------------------------------------------------
 
@@ -263,7 +278,7 @@ class Engine:
         prompt = load_prompt("triage.user.txt").format(
             bot_label=bot_label, exception_type=failure.exception_type,
             log_excerpt=log_excerpt, code_summary=code_summary)
-        self.budget.check(0.01)
+        self.budget.check(TRIAGE_PROJECTION_USD)
         reply = self.backend.complete(
             model, load_prompt("triage.system.txt"),
             [{"type": "text", "text": prompt}], 512)
@@ -304,7 +319,7 @@ class Engine:
             content.append({"type": "image", "data": image})
 
         model = self.models.get("deep", "")
-        self.budget.check(0.06)
+        self.budget.check(DEEP_PROJECTION_USD)
         reply = self.backend.complete(model, load_prompt("deep.system.txt"), content, 4096)
         self.budget.record(reply.usage)
 
@@ -341,12 +356,29 @@ class Engine:
                     model_id=hit.model_id, fingerprint=fp,
                     notes=f"Reused an analysis from {hit.created_at}.")
 
-        # 2. Known pattern -- also free.
-        if fp in self.templates:
+        # 2. Known pattern -- also free, and before any model call rather than
+        #    after a triage call, because the match is deterministic and a model
+        #    cannot tell us anything the rule has not already established.
+        #
+        #    This used to read `if fp in self.templates`, keyed on the
+        #    FINGERPRINT. A fingerprint identifies one exact failure, so a
+        #    template could only ever answer the single failure it was written
+        #    for -- which is why nothing was ever put in it. Matching on the
+        #    class of failure is what makes a library of eight entries able to
+        #    answer thousands. See patterns.py.
+        known = self.library.match(failure.exception_type, failure.message)
+        if known:
             return Analysis(
-                root_cause=self.templates[fp], suggested_fix=self.templates[fp],
-                confidence=0.9, path=Path_.TEMPLATE.value, category="known_pattern",
-                fingerprint=fp)
+                root_cause=known.root_cause,
+                suggested_fix=known.suggested_fix,
+                confidence=TEMPLATE_CONFIDENCE,
+                path=Path_.TEMPLATE.value, category="known_pattern",
+                failure_type=known.failure_type, severity=known.severity,
+                affected_function=known.affected_function,
+                fingerprint=fp,
+                notes=(f"Answered from the known-pattern library ({known.name}); "
+                       "no model was called. This is the standard fix for failures "
+                       "of this kind, not a diagnosis of this one."))
 
         log_excerpt = clean_log[-LOG_EXCERPT_CHARS:]
         code_for_model = clean_code[:CODE_CHARS]

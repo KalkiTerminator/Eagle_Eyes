@@ -32,7 +32,8 @@ from .notify import Notifier, compose
 from .report import ReportInput, write, write_index
 from .runtime import describe_host, resolve_paths
 from .storage import (AnalysisRepo, BotRepo, Database, FailureRepo,
-                      FingerprintRepo, Principal, WatermarkRepo, run_retention)
+                      FingerprintRepo, PatternRepo, Principal, WatermarkRepo,
+                      run_retention)
 from .selection import estimate_cost, pick_file, pick_folder, review
 
 
@@ -93,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
 
     principal = Principal.local()
     db = Database(args.db or resolve_paths().ensure().database)
+    # The known-pattern library, into the table the engine reads. Idempotent,
+    # and here rather than inside Database so that opening a database to read
+    # statistics does not write to it.
+    PatternRepo(db, principal).sync()
 
     if args.retention:
         r = run_retention(db, principal)
@@ -190,7 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         backend, models_for(backend.name),
         budget=BudgetGuard(daily_usd=args.budget, per_run_usd=args.budget,
                            single_call_usd=max(args.budget / 4, 0.05)),
-        cache=cache, screenshot_mode=args.screenshot_mode)
+        cache=cache, screenshot_mode=args.screenshot_mode,
+        library=PatternRepo(db, principal).library())
 
     print(f"\nAnalysing {len(chosen)} failures via {backend.name}"
           f"{' (no model call, no cost)' if backend.name == 'mock' else ''} ...\n")

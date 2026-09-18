@@ -145,7 +145,7 @@ data is synthetic, but credential provenance is a separate question from data pr
 ## How it works
 
 ```
-discover  ->  sanitize  ->  fingerprint  ->  dedup  ->  triage  ->  diagnose  ->  report
+discover -> sanitize -> fingerprint -> dedup -> known pattern -> triage -> diagnose -> report
 ```
 
 | Stage | What it does |
@@ -154,9 +154,17 @@ discover  ->  sanitize  ->  fingerprint  ->  dedup  ->  triage  ->  diagnose  ->
 | **sanitize** | Removes PII and credentials *before* anything is stored or sent |
 | **fingerprint** | Reduces the failure to a stable identity so repeats are recognised |
 | **dedup** | A repeat costs nothing — the largest single saving |
-| **triage** | Cheap model: noise, known pattern, or novel; and whether the screenshot is needed |
+| **known pattern** | A failure whose fix is already written down, answered from the library — no model call |
+| **triage** | Cheap model: noise or novel; and whether the screenshot is needed |
 | **diagnose** | Stronger model, correlating log + code + screenshot |
 | **report** | HTML per failure, plus email with suppression |
+
+The known-pattern library lives in `eagle_eyes/patterns.json` and is loaded into the `pattern`
+table on every boot, so a pattern can be switched off in the database without a redeploy. A rule
+matches only when the exception class *and* the message agree — `HttpRequestException` alone covers
+401, 429, a DNS failure and a TLS error, and the four want different fixes. A template answer is
+recorded as such and carries a lower confidence than a real diagnosis, because it is the standard
+fix for that class of failure rather than an analysis of the one in front of you.
 
 Two properties worth knowing:
 
@@ -199,7 +207,6 @@ paid full price.) An unreachable share degrades to "no cache" and breaks nothing
 |---|---|
 | Language support | Log parsing is tuned to C#/.NET + Selenium. Other languages need the profile work. |
 | LLM providers | Anthropic only (Bedrock, or your own key). |
-| Known-pattern templates | The zero-cost path exists; nothing populates it. |
 | Metrics and structured logging | Only the budget guard. |
 
 ## Development
@@ -209,6 +216,7 @@ eagle_eyes/       runtime, discovery, selection, sanitize, fingerprint,
                   model_gateway, cache, analysis, storage, report, notify
 eagle_eyes/web/   the hosted product: auth, ingest, jobs, spend, seed, app
 eagle_eyes/prompts/   version-controlled prompt files
+eagle_eyes/patterns.json   the known-pattern library, loaded into the DB on boot
 eagle_eyes/schema.sql, schema_pg.sql   SQLite and PostgreSQL, kept in step by a test
 eagle_eyes/storage_pg.py   the dialect seam; repositories carry their own SQL
 tools/            fixture generator, model connectivity check

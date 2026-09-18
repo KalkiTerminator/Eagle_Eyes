@@ -38,8 +38,8 @@ from ..model_gateway import (
 from ..report import ReportInput, render
 from ..storage import (
     ADMIN, MANAGER, USER, AccessDenied, AnalysisRepo, BotRepo, Database,
-    DeveloperRepo, FailureRepo, FeedbackRepo, FingerprintRepo, Principal,
-    now, open_database,
+    DeveloperRepo, FailureRepo, FeedbackRepo, FingerprintRepo, PatternRepo,
+    Principal, now, open_database,
 )
 from . import charts, spend
 from .schedules import (
@@ -99,6 +99,11 @@ class AppState:
         self.jobs = JobQueue(workers=2)
         self.environment = current_environment()
         bootstrap_from_env(self.db, self.env)
+        # The known-pattern library, into the table the engine reads on every
+        # analysis. Idempotent, so it re-runs on every boot and a released
+        # correction to a fix reaches the instance without a data migration --
+        # while an operator's decision to deactivate a pattern survives it.
+        PatternRepo(self.db, Principal.local()).sync()
         self.seed_summary: dict | None = None
         # Reviews awaiting a decision: token -> PendingReview. Held in memory
         # on purpose -- a review is a few minutes of someone's attention, not
@@ -201,7 +206,8 @@ class AppState:
                                  self.environment)
         return Engine(backend, models_for(name),
                       budget=spend.guard_for(self.db, self.env),
-                      screenshot_mode=self.screenshot_mode())
+                      screenshot_mode=self.screenshot_mode(),
+                      library=PatternRepo(self.db, Principal.local()).library())
 
     def screenshot_mode(self) -> int:
         raw = (self.env.get("EAGLE_EYES_SCREENSHOT_MODE") or "0").strip()
@@ -567,7 +573,7 @@ def create_app(db_path: Path | None = None,
             # distinguishable 404 enumerates which ids are real.
             raise HTTPException(status_code=404, detail="no such failure")
         return page(request, "failure.html", row=row,
-                    report=render(_report_input(row)))
+                    report=render(_report_input(row, state.db)))
 
     @app.post("/failures/{failure_id}/feedback")
     def feedback(request: Request, failure_id: int, verdict: str = Form(...),
@@ -853,18 +859,24 @@ def _q(text: str) -> str:
     return quote(text, safe="")
 
 
-def _report_input(row) -> ReportInput:
-    import json
-    inputs: tuple[str, ...] = ()
+def _report_input(row, db=None) -> ReportInput:
+    """The stored row, as the report renderer wants it.
+
+    `exception_type` and `inputs_used` used to be hard-coded empty here, so
+    every hosted report showed a blank Exception row and claimed "log only"
+    whatever it had actually read -- on a page whose whole job is to say what
+    the diagnosis was based on. Both are stored; neither was being selected.
+    """
+    decode = db.decode_list if db is not None else Database.decode_list
     return ReportInput(
         bot_label=f"{row['service_line']}/{row['bot_number']}",
         occurred_at=row["occurred_at"],
-        exception_type="",
+        exception_type=row["exception_type"] or "",
         root_cause=row["root_cause"] or "No analysis is attached to this failure.",
         suggested_fix=row["suggested_fix"] or "",
         confidence=row["confidence"] or 0.0,
         path=row["path"] or "skipped",
-        inputs_used=inputs,
+        inputs_used=decode(row["inputs_used"]),
         log_path=row["log_path"],
         screenshot_path=row["screenshot_path"] or "",
         pairing_method=row["pairing_method"] or "none",
