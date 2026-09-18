@@ -28,7 +28,7 @@ from .cache import SharedCache
 from .discovery import discover, read_text
 from .doctor import report as doctor_report, run_checks
 from .model_gateway import BudgetGuard, create_backend, models_for
-from .notify import Notifier, compose
+from .notify import Notifier, compose, compose_html
 from .report import ReportInput, write, write_index
 from .runtime import describe_host, resolve_paths
 from .storage import (AnalysisRepo, BotRepo, Database, FailureRepo,
@@ -282,13 +282,21 @@ def main(argv: list[str] | None = None) -> int:
                            f"{c.location.bot_number}_{ri.occurred_at.replace(':', '-')}")
                 written.append((ri, rp))
                 if args.notify:
-                    notifier.send(
-                        compose(to=args.notify, bot_label=ri.bot_label,
-                                exception_type=ri.exception_type,
-                                root_cause=a.root_cause, suggested_fix=a.suggested_fix,
-                                confidence=a.confidence, fingerprint=a.fingerprint,
-                                report_path=rp),
-                        category=a.category, confidence=a.confidence)
+                    note = compose(
+                        to=args.notify, bot_label=ri.bot_label,
+                        exception_type=ri.exception_type,
+                        root_cause=a.root_cause, suggested_fix=a.suggested_fix,
+                        confidence=a.confidence, fingerprint=a.fingerprint,
+                        report_path=rp)
+                    note.html = compose_html(
+                        bot_label=ri.bot_label, exception_type=ri.exception_type,
+                        root_cause=a.root_cause, suggested_fix=a.suggested_fix,
+                        confidence=a.confidence, severity=a.severity,
+                        failure_type=a.failure_type,
+                        affected_function=a.affected_function,
+                        recommendations=a.recommendations, path=a.path)
+                    notifier.send(note, category=a.category,
+                                  confidence=a.confidence)
             except Exception as exc:
                 print(f"        ! no report: {exc}")
 

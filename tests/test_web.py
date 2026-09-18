@@ -661,5 +661,132 @@ def test_untrusted_content_is_escaped_in_the_page() -> None:
         _cleanup(c, d)
 
 
+# ------------------------------------------------------------------- email
+
+def _own_a_bot(c, email: str) -> None:
+    """Make `email` the owner of every bot, through the app's own repository."""
+    from eagle_eyes.storage import BotRepo, Principal, ADMIN
+    db = c.app.state.ee.db
+    p = Principal("test-setup", ADMIN)
+    for row in db.conn.execute("SELECT id FROM bot"):
+        BotRepo(db, p).set_owner(row["id"], email)
+
+
+def _disown_bots(c) -> None:
+    """An uploaded bot is owned by whoever uploaded it, so ownerlessness -- the
+    state a SCANNED bot starts in -- has to be arranged deliberately."""
+    c.app.state.ee.db.conn.execute("UPDATE bot SET owner_dev_id = NULL")
+
+
+def _set_confidence(c, value: float) -> None:
+    """MockBackend answers at confidence 0.0, and 0.0 is correctly held for the
+    digest rather than mailed as an answer. Testing the ROUTING therefore needs
+    an analysis with a confidence the mock cannot produce."""
+    c.app.state.ee.db.conn.execute("UPDATE analysis SET confidence = ?", (value,))
+
+
+def test_emailing_a_diagnosis_refuses_before_it_guesses() -> None:
+    """Three refusals, each of which would be worse as a send.
+
+    Nothing to say, nobody to say it to, or already said -- and the last one is
+    the product working, not failing.
+    """
+    c, d = _client()
+    try:
+        _login(c, ADMIN_EMAIL, ADMIN_PASSWORD)
+        r = _submit_and_run(c, log=("bot.log", NOVEL_LOG, "text/plain"))
+        failure_id = _wait(c, r.headers["location"])["result"]["failure_id"]
+
+        _set_confidence(c, 0.85)
+
+        # 1. No owner on the bot -> no recipient, and none is invented.
+        _disown_bots(c)
+        r = c.post(f"/failures/{failure_id}/email", follow_redirects=False)
+        check("an ownerless bot is refused", "mail=no_owner" in r.headers["location"],
+              r.headers["location"])
+        page = c.get(f"/failures/{failure_id}?mail=no_owner").text
+        check("  and the page says why, in terms of what to do",
+              "Nobody owns this bot" in page and "Team tab" in page)
+
+        # 2. With an owner, the first send goes.
+        _own_a_bot(c, "owner@x.com")
+        r = c.post(f"/failures/{failure_id}/email", follow_redirects=False)
+        where = r.headers["location"]
+        check("with an owner it is sent", "mail=dry_run" in where, where)
+        check("  as a dry run, because no relay is configured", "mail=sent" not in where)
+
+        # 3. The same failure again is suppressed -- ACROSS REQUESTS, which is
+        #    the whole point of the durable store. With the in-memory one a new
+        #    Notifier is built per request and this would send every time.
+        r = c.post(f"/failures/{failure_id}/email", follow_redirects=False)
+        check("the same failure to the same developer is suppressed the second time",
+              "mail=suppressed" in r.headers["location"], r.headers["location"])
+        check("  and the reason is carried to the page",
+              "already+notified" in r.headers["location"]
+              or "already%20notified" in r.headers["location"],
+              r.headers["location"])
+
+        page = c.get(f"/failures/{failure_id}?mail=suppressed&why=already+notified").text
+        check("  which the page shows rather than hiding", "Not sent, on purpose" in page)
+
+        n = c.app.state.ee.db.conn.execute(
+            "SELECT COUNT(*) n FROM audit_event WHERE action='notify'").fetchone()["n"]
+        check("every attempt is audited, sent or not", n >= 3, str(n))
+    finally:
+        _cleanup(c, d)
+
+
+def test_the_recipient_is_the_bot_owner_not_whoever_clicked() -> None:
+    """A diagnosis in the wrong inbox is a disclosure as well as a waste."""
+    c, d = _client()
+    try:
+        _login(c, ADMIN_EMAIL, ADMIN_PASSWORD)
+        r = _submit_and_run(c, log=("bot.log", NOVEL_LOG, "text/plain"))
+        failure_id = _wait(c, r.headers["location"])["result"]["failure_id"]
+        _set_confidence(c, 0.85)
+        # The uploader owns what they uploaded, so this reassignment is what
+        # makes the test mean anything: the owner is now someone else.
+        _own_a_bot(c, "owner@x.com")
+
+        c.post(f"/failures/{failure_id}/email", follow_redirects=False)
+
+        # The dry run records the recipient in notification_state, keyed on the
+        # developer -- so the address it chose is checkable rather than a claim.
+        row = c.app.state.ee.db.conn.execute(
+            "SELECT d.email FROM notification_state ns"
+            " JOIN developer d ON d.id = ns.developer_id").fetchone()
+        check("the mail went to the bot's owner", row is not None
+              and row["email"] == "owner@x.com",
+              row["email"] if row else "nothing recorded")
+        check("  and not to the admin who pressed the button",
+              (row["email"] if row else "") != ADMIN_EMAIL)
+    finally:
+        _cleanup(c, d)
+
+
+def test_the_html_part_carries_the_severity_as_a_word() -> None:
+    """Colour is never the only carrier, in mail least of all.
+
+    Clients invert, re-theme and strip styles, so a severity that exists only
+    as a background colour does not exist for some readers at all.
+    """
+    from eagle_eyes.notify import SEVERITY_COLOUR, compose_html
+    from eagle_eyes.web.charts import SEVERITY_STATUS, STATUS_LIGHT
+
+    for severity, (label, colour) in SEVERITY_COLOUR.items():
+        html = compose_html(bot_label="SL/BOT1", exception_type="X.YException",
+                            root_cause="rc", suggested_fix="sf", confidence=0.9,
+                            severity=severity)
+        check(f"{severity}: the word is in the mail", label in html)
+        check(f"{severity}: the colour matches the product's status palette",
+              colour == STATUS_LIGHT[SEVERITY_STATUS[severity]],
+              f"{colour} vs {STATUS_LIGHT[SEVERITY_STATUS[severity]]}")
+
+    plain = compose_html(bot_label="SL/BOT1", exception_type="X.YException",
+                         root_cause="rc", suggested_fix="sf", confidence=0.9)
+    check("an unclassified analysis gets no badge rather than an invented one",
+          "CRITICAL" not in plain and "LOW" not in plain)
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

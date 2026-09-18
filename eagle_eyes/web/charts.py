@@ -35,9 +35,35 @@ SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"]
 ORDINAL_LIGHT = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
 ORDINAL_DARK = ["#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"]
 
-# Status. Reserved -- never reused as a series colour, always with a label.
-STATUS = {"good": "#0ca30c", "warning": "#fab219",
-          "serious": "#ec835a", "critical": "#d03b3b"}
+# Status. Reserved -- never reused as a series colour, and NEVER the only
+# thing carrying the meaning.
+#
+# The light values are the POC kit's, unchanged. They pass the categorical gate
+# in light mode. The dark ones are derived from them: scaled down the same hue
+# until each sits inside the dark lightness band (0.48-0.67) with chroma >= 0.1
+# and >= 3:1 against the dark chart surface, then separated in lightness so
+# `serious` and `critical` -- the same hue -- do not read as one colour.
+#
+# The dark set FAILS the categorical CVD check: amber against red is dE 4.3 for
+# a deuteranope. That is not a value that can be tuned away. Green, amber and
+# red are not chosen to be mutually distinguishable, they are chosen because
+# everyone already knows what they mean, and the best separation available
+# turns "red" into magenta and loses the convention that made the palette worth
+# adopting. So the categorical gate is the wrong test here, and the relief it
+# asks for is the rule instead: every status colour in this product appears
+# with a WORD next to it, never hue alone. A template test enforces that, which
+# is the only thing that makes this palette legitimate.
+STATUS_LIGHT = {"good": "#10B981", "warning": "#F59E0B",
+                "serious": "#EF4444", "critical": "#B91C1C"}
+STATUS_DARK = {"good": "#0B9769", "warning": "#BC7806",
+               "serious": "#FA4848", "critical": "#C71F1F"}
+
+# The severity levels an analysis can carry, mapped onto those four roles.
+# Ordered worst-first, which is the order a triage list wants.
+SEVERITY_STATUS = {"critical": "critical", "high": "serious",
+                   "medium": "warning", "low": "good"}
+
+STATUS = STATUS_LIGHT          # the light set, for anything not theme-aware
 
 
 def palette_css() -> str:
@@ -50,7 +76,8 @@ def palette_css() -> str:
     dark = "\n".join(f"  --series-{i + 1}: {c};" for i, c in enumerate(SERIES_DARK))
     ol = "\n".join(f"  --ord-{i + 1}: {c};" for i, c in enumerate(ORDINAL_LIGHT))
     od = "\n".join(f"  --ord-{i + 1}: {c};" for i, c in enumerate(ORDINAL_DARK))
-    status = "\n".join(f"  --status-{k}: {v};" for k, v in STATUS.items())
+    status = "\n".join(f"  --status-{k}: {v};" for k, v in STATUS_LIGHT.items())
+    status_dark = "\n".join(f"  --status-{k}: {v};" for k, v in STATUS_DARK.items())
     return f""".viz {{
   color-scheme: light;
   --viz-surface: #ffffff;
@@ -70,6 +97,7 @@ def palette_css() -> str:
     --viz-ink-soft: #a8a79c;
 {dark}
 {od}
+{status_dark}
   }}
 }}
 :root[data-theme="dark"] .viz {{
@@ -80,6 +108,7 @@ def palette_css() -> str:
   --viz-ink-soft: #a8a79c;
 {dark}
 {od}
+{status_dark}
 }}"""
 
 

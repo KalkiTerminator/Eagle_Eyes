@@ -36,6 +36,11 @@ class Notification:
     body: str
     fingerprint: str
     report_path: str = ""
+    # An optional HTML alternative. The plain text stays the real message --
+    # it is what a text client, a screen reader and a mail archive show, and a
+    # diagnosis that only exists in the HTML part is a diagnosis some readers
+    # never get. HTML is added as an alternative to it, never instead of it.
+    html: str = ""
 
 
 class SuppressionStore(Protocol):
@@ -118,6 +123,8 @@ class Decision:
 class Notifier:
     def __init__(self, *, dry_run: bool = True, smtp_host: str = "",
                  smtp_port: int = 25, sender: str = "eagle-eyes@localhost",
+                 smtp_user: str = "", smtp_password: str = "",
+                 starttls: bool = True,
                  per_developer_hourly_cap: int = 10,
                  repeat_window_hours: int = 24,
                  min_confidence: float = 0.3,
@@ -126,6 +133,13 @@ class Notifier:
         self.smtp_host = smtp_host
         self.smtp_port = smtp_port
         self.sender = sender
+        self.smtp_user = smtp_user
+        self.smtp_password = smtp_password
+        # On by default. An internal relay on port 25 that does not offer
+        # STARTTLS is handled by the capability check at send time; defaulting
+        # this to False would silently send a diagnosis, a bot name and a
+        # developer's address in clear text across the estate.
+        self.starttls = starttls
         self.cap = per_developer_hourly_cap
         self.repeat_window = timedelta(hours=repeat_window_hours)
         self.min_confidence = min_confidence
@@ -186,17 +200,48 @@ class Notifier:
         if self.dry_run:
             self.sent_log.append(n)
         else:
-            msg = EmailMessage()
-            msg["From"] = self.sender
-            msg["To"] = n.to
-            msg["Subject"] = n.subject
-            msg.set_content(n.body)
-            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20) as s:
-                s.send_message(msg)
+            self._relay(self.build_message(n))
             self.sent_log.append(n)
 
         self._record(n.to, n.fingerprint, now)
         return d
+
+    def build_message(self, n: Notification) -> EmailMessage:
+        """The MIME message, built the same way whether or not it is sent.
+
+        Separate from `_relay` so a dry run and a real send produce the same
+        bytes -- a dry run that exercises a different code path is not a
+        rehearsal of anything.
+        """
+        msg = EmailMessage()
+        msg["From"] = self.sender
+        msg["To"] = n.to
+        msg["Subject"] = n.subject
+        msg.set_content(n.body)
+        if n.html:
+            msg.add_alternative(n.html, subtype="html")
+        return msg
+
+    def _relay(self, msg: EmailMessage) -> None:
+        with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20) as s:
+            s.ehlo()
+            if self.starttls and s.has_extn("starttls"):
+                s.starttls()
+                s.ehlo()                      # capabilities change after upgrade
+            if self.smtp_user:
+                # Only after the upgrade, and only when the relay wants one --
+                # sending AUTH on a plaintext connection hands over the
+                # password. A relay that takes credentials and offers no
+                # STARTTLS is a misconfiguration to fix, not to work around.
+                if self.starttls and not s.has_extn("starttls"):
+                    raise RuntimeError(
+                        f"{self.smtp_host}:{self.smtp_port} does not offer STARTTLS "
+                        "and credentials were configured. Refusing to send the "
+                        "password in clear text. Fix the relay, or set "
+                        "EAGLE_EYES_SMTP_STARTTLS=0 knowingly for a trusted "
+                        "internal relay with no credentials.")
+                s.login(self.smtp_user, self.smtp_password)
+            s.send_message(msg)
 
     def digest(self) -> str:
         """What was held back, so suppression is visible rather than silent."""
@@ -237,3 +282,109 @@ the next person.
     return Notification(to=to, subject=f"[Eagle Eyes] {bot_label}: {short}",
                         body=body, fingerprint=fingerprint,
                         report_path=str(report_path))
+
+
+# Severity -> (label, colour). The LIGHT status values from web/charts.py,
+# repeated here as a literal rather than imported: notify.py is the CLI's, and
+# the CLI must not depend on the web package. A test asserts the two agree, so
+# the copy cannot drift silently.
+#
+# Light only, and every badge carries the WORD as well as the colour. Mail
+# clients invert, re-theme and strip styles unpredictably, and a severity that
+# survives only as a background colour does not survive at all -- which is the
+# same rule the product's own pages follow, for a different reason.
+SEVERITY_COLOUR = {
+    "critical": ("CRITICAL", "#B91C1C"),
+    "high":     ("HIGH",     "#EF4444"),
+    "medium":   ("MEDIUM",   "#F59E0B"),
+    "low":      ("LOW",      "#10B981"),
+}
+
+
+def compose_html(*, bot_label: str, exception_type: str, root_cause: str,
+                 suggested_fix: str, confidence: float, severity: str = "",
+                 failure_type: str = "", affected_function: str = "",
+                 recommendations: str = "", report_url: str = "",
+                 path: str = "") -> str:
+    """The HTML alternative: an internal work email, not a newsletter.
+
+    Every style is inline. Mail clients strip <style> blocks, ignore external
+    sheets and rewrite classes, so a stylesheet here means the diagnosis
+    arrives as unstyled text at some fraction of recipients and there is no way
+    to find out which.
+    """
+    from html import escape
+
+    def e(v) -> str:
+        return escape(str(v or ""), quote=True)
+
+    short = exception_type.split(".")[-1] or "Failure"
+    label, colour = SEVERITY_COLOUR.get(severity, ("", ""))
+    badge = ""
+    if label:
+        badge = (f'<span style="display:inline-block;padding:3px 10px;border-radius:3px;'
+                 f'background:{colour};color:#ffffff;font-size:12px;font-weight:700;'
+                 f'letter-spacing:.06em">{label}</span>')
+
+    meta = [("Bot", bot_label), ("Exception", short)]
+    if failure_type:
+        meta.append(("Type", failure_type.replace("_", " ")))
+    meta.append(("Confidence", f"{confidence:.2f}"
+                 + ("  — a lead, not an answer" if confidence < 0.5 else "")))
+    if affected_function:
+        meta.append(("Affected function", affected_function))
+    if path:
+        meta.append(("Answered by", "the known-pattern library" if path == "template"
+                     else f"a model ({path})"))
+    rows = "".join(
+        f'<tr><td style="padding:4px 14px 4px 0;color:#666;font-size:13px;'
+        f'white-space:nowrap">{e(k)}</td>'
+        f'<td style="padding:4px 0;font-size:13px">{e(v)}</td></tr>'
+        for k, v in meta)
+
+    extra = ""
+    if recommendations:
+        extra = (f'<h3 style="margin:26px 0 6px;font-size:14px;letter-spacing:.04em;'
+                 f'text-transform:uppercase;color:#666">Also worth doing</h3>'
+                 f'<p style="margin:0;font-size:14px;line-height:1.55">'
+                 f'{e(recommendations)}</p>')
+
+    link = ""
+    if report_url:
+        link = (f'<p style="margin:26px 0 0;font-size:14px">'
+                f'<a href="{e(report_url)}" style="color:#2a78d6">Open the full report</a>'
+                f' — including the screenshot, which opens with your existing access '
+                f'and is not attached to this mail.</p>')
+
+    return f"""<!doctype html>
+<html><body style="margin:0;padding:24px;background:#f6f6f4;
+  font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a">
+<div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e0e0e0;
+  border-radius:6px;padding:28px">
+
+  <p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+    color:#666">Eagle Eyes — automated diagnosis</p>
+  <h1 style="margin:0 0 14px;font-size:20px;line-height:1.3">{e(bot_label)} failed: {e(short)}</h1>
+  {badge}
+
+  <h2 style="margin:26px 0 6px;font-size:14px;letter-spacing:.04em;
+    text-transform:uppercase;color:#666">What went wrong</h2>
+  <p style="margin:0;font-size:15px;line-height:1.6">{e(root_cause)}</p>
+
+  <h2 style="margin:26px 0 6px;font-size:14px;letter-spacing:.04em;
+    text-transform:uppercase;color:#666">Suggested fix</h2>
+  <div style="margin:0;padding:14px 16px;background:#f6f6f4;border-left:3px solid #2a78d6;
+    font-size:14px;line-height:1.6;white-space:pre-wrap">{e(suggested_fix)}</div>
+
+  {extra}
+
+  <table style="margin:26px 0 0;border-collapse:collapse">{rows}</table>
+  {link}
+
+  <p style="margin:26px 0 0;padding-top:16px;border-top:1px solid #e0e0e0;
+    font-size:12px;line-height:1.6;color:#666">
+    This is an automated analysis and it can be wrong. Review it before applying
+    anything. Marking it correct, partial or wrong in Eagle Eyes is what stops a
+    bad diagnosis reaching the next person who hits this failure.
+  </p>
+</div></body></html>"""

@@ -77,6 +77,23 @@ Once approved, three tabs:
 | **Analytics** | everyone | Trend, what fails most, confidence spread, how each failure was answered, feedback |
 | **Team** | managers, admins | Volume and spend per service line; bots worst first |
 
+**Emailing a diagnosis** goes to whoever owns the bot, resolved from `bot.owner_dev_id` — never to
+whoever pressed the button, and never to an address the page guessed: an unowned bot is refused with
+a link to the Team tab. It is a **dry run unless `EAGLE_EYES_SMTP_HOST` and
+`EAGLE_EYES_SMTP_SENDER` are both set**, which is what the hosted instance runs on. Suppression is
+durable either way — the same failure to the same developer sends once and is then counted, across
+requests and across restarts, because an incident that delivers two hundred mails gets the sender
+filtered to junk permanently and then delivers nothing at all.
+
+| Variable | Default | |
+|---|---|---|
+| `EAGLE_EYES_SMTP_HOST` | — | Unset means dry-run. Nothing is sent. |
+| `EAGLE_EYES_SMTP_SENDER` | — | Also required. A host without a sender stays dry-run rather than inventing a From. |
+| `EAGLE_EYES_SMTP_PORT` | `587` | The submission port, which offers STARTTLS. |
+| `EAGLE_EYES_SMTP_USER` / `_PASSWORD` | — | Sent only after STARTTLS. A relay that takes credentials over plaintext is refused, not worked around. |
+| `EAGLE_EYES_SMTP_STARTTLS` | `1` | `0` only for a trusted internal relay that takes no credentials. |
+| `EAGLE_EYES_BASE_URL` | — | Where the link in the mail points. Unset means no link, rather than one guessed from the Host header. |
+
 **The Analyse tab takes a folder, not a file**, and that is the point: the browser sends every file
 with its relative path, the server rebuilds the tree, and `discovery.discover` reads it — the same
 function the scanner points at a real share. Service line and bot number come from the directory

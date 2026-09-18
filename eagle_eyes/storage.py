@@ -1077,6 +1077,19 @@ class DeveloperRepo(Repository):
             "INSERT INTO team(name, created_at) VALUES (?,?)", (name, now()))
         return cur.lastrowid
 
+    def email_of(self, developer_id: int | None) -> str:
+        """The address for a developer id, or empty. Never invented.
+
+        An empty answer is the correct one when a bot has no owner: the caller
+        refuses to send rather than guessing a recipient, because a diagnosis
+        mailed to the wrong person is both useless and a disclosure.
+        """
+        if developer_id is None:
+            return ""
+        row = self.db.conn.execute(
+            "SELECT email FROM developer WHERE id=?", (developer_id,)).fetchone()
+        return row["email"] if row else ""
+
     def team_of(self, email: str) -> str | None:
         row = self.db.conn.execute(
             "SELECT t.name FROM developer d JOIN team t ON t.id=d.team_id"

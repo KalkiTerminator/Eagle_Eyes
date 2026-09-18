@@ -35,13 +35,14 @@ from ..analysis import SCREENSHOT_MODES, Engine
 from ..model_gateway import (
     BackendError, MODELS, create_backend, current_environment, models_for,
 )
+from ..notify import compose, compose_html
 from ..report import ReportInput, render
 from ..storage import (
     ADMIN, MANAGER, USER, AccessDenied, AnalysisRepo, BotRepo, Database,
     DeveloperRepo, FailureRepo, FeedbackRepo, FingerprintRepo, PatternRepo,
     Principal, now, open_database,
 )
-from . import charts, spend
+from . import charts, mail, spend
 from .schedules import (
     MIN_MINUTES, ScheduleRepo, ScheduleRunner, can_scan_this_host,
 )
@@ -561,6 +562,23 @@ def create_app(db_path: Path | None = None,
             raise HTTPException(status_code=404, detail="no such schedule")
         return RedirectResponse("/app", status_code=303)
 
+    # What the mail route's `?mail=` outcomes mean on the page. Headline, the
+    # tone class, and whether a detail line is worth showing. Suppressed is not
+    # a failure -- it is the product doing the thing it exists to do -- so it
+    # reads as information rather than as an error.
+    MAIL_OUTCOMES = {
+        "sent": ("Sent to the developer who owns this bot.", "good", True),
+        "dry_run": ("Rendered, not sent — no SMTP relay is configured.",
+                    "good", True),
+        "suppressed": ("Not sent, on purpose.", "warn", True),
+        "no_analysis": ("Nothing to send: this failure has no diagnosis yet.",
+                        "warn", False),
+        "no_owner": ("Nobody owns this bot, so there is no address to send to. "
+                     "Assign an owner on the Team tab.", "warn", False),
+        "failed": ("The relay refused the message. Nothing was sent and the "
+                   "attempt is in the audit log.", "bad", False),
+    }
+
     @app.get("/failures/{failure_id}", response_class=HTMLResponse)
     def failure(request: Request, failure_id: int,
                 account: Account = Depends(require_approved),
@@ -572,8 +590,15 @@ def create_app(db_path: Path | None = None,
             # The same answer whether it does not exist or is not theirs: a
             # distinguishable 404 enumerates which ids are real.
             raise HTTPException(status_code=404, detail="no such failure")
+        outcome = request.query_params.get("mail", "")
+        headline, tone, show_why = MAIL_OUTCOMES.get(outcome, ("", "", False))
         return page(request, "failure.html", row=row,
-                    report=render(_report_input(row, state.db)))
+                    report=render(_report_input(row, state.db)),
+                    mail_live=mail.configured(state.env),
+                    mail_outcome=outcome if headline else "",
+                    mail_headline=headline, mail_tone=tone,
+                    mail_detail=(request.query_params.get("why", "")[:200]
+                                 if show_why else ""))
 
     @app.post("/failures/{failure_id}/feedback")
     def feedback(request: Request, failure_id: int, verdict: str = Form(...),
@@ -592,6 +617,91 @@ def create_app(db_path: Path | None = None,
         FeedbackRepo(state.db, p).add(row["analysis_id"], failure_id, dev_id,
                                       verdict, comment[:1000])
         return RedirectResponse(f"/failures/{failure_id}", status_code=303)
+
+    @app.post("/failures/{failure_id}/email")
+    def email_diagnosis(request: Request, failure_id: int,
+                        account: Account = Depends(require_approved),
+                        state: AppState = Depends(get_state)):
+        """Mail the diagnosis to the developer who owns the bot.
+
+        Three refusals, all of them deliberate:
+
+          * No analysis -- there is nothing to send, and a mail saying so is
+            noise in the inbox the suppression rules exist to protect.
+          * No owner on the bot -- the recipient is never guessed and never
+            defaulted to the person who clicked. A diagnosis in the wrong inbox
+            is a disclosure as well as a waste.
+          * Suppressed -- the mail is not sent and the reason is shown. That is
+            the product working, not failing, so it is reported as an outcome
+            rather than as an error.
+
+        The recipient is the BOT OWNER, not the signed-in user, and the route is
+        still behind `FailureRepo.get`, so nobody can use it to discover whether
+        a failure they cannot see exists.
+        """
+        p = account.principal()
+        try:
+            row = FailureRepo(state.db, p).get(failure_id)
+        except AccessDenied:
+            raise HTTPException(status_code=404, detail="no such failure")
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such failure")
+
+        repo = FailureRepo(state.db, p)
+        if row["analysis_id"] is None:
+            repo._audit("notify", "failure", failure_id, "deny")
+            return RedirectResponse(f"/failures/{failure_id}?mail=no_analysis",
+                                    status_code=303)
+
+        to = DeveloperRepo(state.db, p).email_of(row["owner_dev_id"])
+        if not to:
+            repo._audit("notify", "failure", failure_id, "deny")
+            return RedirectResponse(f"/failures/{failure_id}?mail=no_owner",
+                                    status_code=303)
+
+        notifier = mail.notifier_for(state.db, p, state.env)
+        base = mail.base_url(state.env)
+        url = f"{base}/failures/{failure_id}" if base else ""
+        fingerprint_hash = state.db.conn.execute(
+            "SELECT hash FROM fingerprint WHERE id=?",
+            (row["fingerprint_id"],)).fetchone()["hash"]
+
+        note = compose(
+            to=to, bot_label=f"{row['service_line']}/{row['bot_number']}",
+            exception_type=row["exception_type"] or "",
+            root_cause=row["root_cause"] or "",
+            suggested_fix=row["suggested_fix"] or "",
+            confidence=row["confidence"] or 0.0,
+            fingerprint=fingerprint_hash, report_path=url)
+        note.html = compose_html(
+            bot_label=f"{row['service_line']}/{row['bot_number']}",
+            exception_type=row["exception_type"] or "",
+            root_cause=row["root_cause"] or "",
+            suggested_fix=row["suggested_fix"] or "",
+            confidence=row["confidence"] or 0.0,
+            severity=row["severity"] or "", failure_type=row["failure_type"] or "",
+            affected_function=row["affected_function"] or "",
+            recommendations=row["recommendations"] or "",
+            report_url=url, path=row["path"] or "")
+
+        try:
+            decision = notifier.send(
+                note, category="novel", confidence=row["confidence"] or 0.0)
+        except Exception as exc:                  # relay down, auth refused, DNS
+            # Never a 500. The relay is outside this process and a page that
+            # breaks when it is down tells the user nothing they can act on.
+            repo._audit("notify", "failure", failure_id, "deny")
+            print(f"  ! mail to {to} failed: {exc}", flush=True)
+            return RedirectResponse(f"/failures/{failure_id}?mail=failed",
+                                    status_code=303)
+
+        repo._audit("notify", "failure", failure_id,
+                    "allow" if decision.send else "deny")
+        outcome = ("sent" if mail.configured(state.env) else "dry_run") \
+            if decision.send else "suppressed"
+        return RedirectResponse(
+            f"/failures/{failure_id}?mail={outcome}&why={_q(decision.reason)}",
+            status_code=303)
 
     # --------------------------------------------------------------- upload
 

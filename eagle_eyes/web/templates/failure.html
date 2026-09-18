@@ -10,7 +10,37 @@
           sandbox srcdoc="{{ report|e }}"></iframe>
 </div>
 
+{% if mail_outcome %}
+<div class="card {{ mail_tone }}">
+  <p style="margin:0"><b>{{ mail_headline }}</b></p>
+  {% if mail_detail %}<p class="muted small" style="margin:6px 0 0">{{ mail_detail }}</p>{% endif %}
+</div>
+{% endif %}
+
 {% if row['analysis_id'] %}
+<div class="card">
+  <h3 style="margin-top:0">Send this to the developer</h3>
+  <p class="muted small">
+    Goes to whoever owns <b>{{ row['service_line'] }}/{{ row['bot_number'] }}</b> —
+    not to you, and never to an address this page guessed.
+    {% if mail_live %}
+      A relay is configured, so this sends for real.
+    {% else %}
+      No SMTP relay is configured, so this renders the mail and records the
+      decision without sending it. That is the default, and it is what the
+      hosted demo runs on.
+    {% endif %}
+  </p>
+  <p class="muted small">
+    Suppression applies either way: the same failure to the same developer
+    sends once and is then counted, so an incident cannot deliver two hundred
+    mails and get this sender filtered to junk for good.
+  </p>
+  <form method="post" action="/failures/{{ row['id'] }}/email">
+    <button type="submit">{{ "Send diagnosis" if mail_live else "Render diagnosis (dry run)" }}</button>
+  </form>
+</div>
+
 <div class="card">
   <h3 style="margin-top:0">Was this right?</h3>
   <p class="muted small">
