@@ -207,7 +207,10 @@ def _store(db, p, candidate, engine, fp_hash: str, may_analyse: bool,
             tokens_in=sum(u.input_tokens for u in analysis.usages),
             tokens_out=sum(u.output_tokens for u in analysis.usages),
             cost_usd=cost,
-            latency_ms=sum(u.latency_ms for u in analysis.usages))
+            latency_ms=sum(u.latency_ms for u in analysis.usages),
+            failure_type=analysis.failure_type, severity=analysis.severity,
+            affected_function=analysis.affected_function,
+            recommendations=analysis.recommendations)
         seen[fp_hash] = analysis_id
         summary["analysed"] += 1
         summary["cost_usd"] += cost

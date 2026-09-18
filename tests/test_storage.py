@@ -52,14 +52,33 @@ def test_schema_matches_the_doc() -> None:
           blocks[0].strip() == in_file[ddl_start:].strip())
 
 
+def _v5_schema() -> str:
+    """schema.sql as version 5 looked -- before the failure taxonomy.
+
+    Derived by deleting the four taxonomy columns from the current file rather
+    than pasting a copy, so that adding a fifth one without extending
+    migration 6 makes this fail instead of quietly skipping it.
+    """
+    full = SCHEMA_PATH.read_text()
+    start = full.index("    -- The failure taxonomy.")
+    end = full.index("    recommendations   TEXT,\n") + len("    recommendations   TEXT,\n")
+    return full[:start] + full[end:]
+
+
 def _v1_schema() -> str:
     """schema.sql as version 1 actually looked.
 
     Derived from the current file rather than pasted, so a new table added to
     schema.sql without a migration makes the equivalence test fail loudly
     instead of the two quietly describing different databases.
+
+    It starts from the v5 shape because v1 had no taxonomy columns either, and
+    migration 4 rebuilds `analysis` with `INSERT ... SELECT *`. Deriving v1
+    from the *current* file gave that SELECT four columns the v3 table it was
+    written against never had, and it failed with a column count mismatch --
+    the test complaining, correctly, that the derivation was a fiction.
     """
-    full = SCHEMA_PATH.read_text()
+    full = _v5_schema()
     v1 = full.split("-- ---------- accounts ----------")[0]
     v1 = v1.replace("CHECK (processing_mode IN (0, 3))",
                     "CHECK (processing_mode BETWEEN 0 AND 3)")
@@ -150,6 +169,112 @@ def test_migration_lands_where_a_fresh_schema_does() -> None:
         except sqlite3.IntegrityError:
             refused = True
         check("and the upgraded table refuses a new mode 1 row", refused)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_migration_6_lands_where_a_fresh_schema_does() -> None:
+    """The taxonomy migration, checked the way 2-5 are: object by object.
+
+    And the part that matters more than the shape -- a diagnosis stored before
+    the taxonomy existed still has its root cause afterwards, with the four new
+    fields NULL. NULL is the honest value: nobody classified that failure.
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        v5 = _v5_schema()
+        check("the derived v5 schema really lacks the taxonomy",
+              "failure_type" not in v5 and "affected_function" not in v5)
+
+        con = sqlite3.connect(str(d / "old.db"))
+        con.executescript(v5)
+        con.execute("INSERT INTO bot(service_line, bot_number) VALUES ('SL','B1')")
+        con.execute("INSERT INTO fingerprint(hash, version, exception_type,"
+                    " normalized_message, code_location, expires_at)"
+                    " VALUES (?,1,'E','m','l.cs:1','2030-01-01')", ("b" * 64,))
+        con.execute("INSERT INTO analysis(fingerprint_id, path, root_cause,"
+                    " suggested_fix, confidence, expires_at)"
+                    " VALUES (1,'text','old cause','old fix',0.7,'2030-01-01')")
+        con.execute("PRAGMA user_version = 5")
+        con.commit()
+        con.close()
+
+        migrated = Database(d / "old.db")
+        fresh = Database(d / "new.db")
+
+        v = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        check("migration 6 stamps the new version", v == SCHEMA_VERSION, str(v))
+
+        def shape(db):
+            out = {}
+            for r in db.conn.execute(
+                    "SELECT type, name, sql FROM sqlite_master"
+                    " WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"):
+                sql = re.sub(r"--[^\n]*", "", r["sql"] or "")
+                sql = re.sub(r'"(\w+)"', r"\1", sql)
+                out[(r["type"], r["name"])] = re.sub(r"\s+", " ", sql).strip()
+            return out
+
+        a, b = shape(migrated), shape(fresh)
+        check("migration 6 leaves the same set of objects", set(a) == set(b),
+              str(set(a) ^ set(b)))
+        differing = sorted(k for k in set(a) & set(b) if a[k] != b[k])
+        check("  and each is defined identically", not differing, str(differing))
+
+        row = migrated.conn.execute("SELECT * FROM analysis").fetchone()
+        check("the diagnosis survives the rebuild",
+              (row["root_cause"], row["suggested_fix"]) == ("old cause", "old fix"),
+              str(tuple(row)[:6]))
+        check("  with the taxonomy NULL rather than invented",
+              row["failure_type"] is None and row["severity"] is None
+              and row["affected_function"] is None and row["recommendations"] is None)
+
+        check("and no foreign key is left dangling",
+              migrated.conn.execute("PRAGMA foreign_key_check").fetchall() == [])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_unclassified_analysis_is_storable_and_readable() -> None:
+    """The degradation path: a model that returns no taxonomy, stored and read.
+
+    `add()` takes "" for all four and must write NULL, because the column CHECK
+    accepts NULL or a member of the closed list and would refuse "". Getting
+    this wrong makes every template answer and every older model unstorable.
+    """
+    db, d = _db()
+    try:
+        _bot, fp = _seed(db)
+        ar = AnalysisRepo(db, P)
+        plain = ar.add(fp, path="text", root_cause="rc", suggested_fix="sf",
+                       confidence=0.6)
+        full = ar.add(fp, path="text", root_cause="rc2", suggested_fix="sf2",
+                      confidence=0.9, failure_type="selector", severity="high",
+                      affected_function="Post", recommendations="add a wait")
+
+        a = ar.get(plain)
+        check("an analysis with no taxonomy stores", a is not None)
+        check("  and reads back as NULL, not as an empty string",
+              a["failure_type"] is None and a["severity"] is None
+              and a["affected_function"] is None and a["recommendations"] is None)
+
+        b = ar.get(full)
+        check("a classified analysis keeps every field",
+              (b["failure_type"], b["severity"], b["affected_function"],
+               b["recommendations"]) == ("selector", "high", "Post", "add a wait"),
+              str((b["failure_type"], b["severity"])))
+
+        refused = False
+        try:
+            db.conn.execute(
+                "INSERT INTO analysis(fingerprint_id, path, confidence, expires_at)"
+                " VALUES (?,'text',0.5,'2030-01-01')", (fp,))
+            db.conn.execute("UPDATE analysis SET severity='catastrophic'"
+                            " WHERE id=(SELECT MAX(id) FROM analysis)")
+        except sqlite3.IntegrityError:
+            refused = True
+        check("a severity outside the closed list is refused by the database",
+              refused)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

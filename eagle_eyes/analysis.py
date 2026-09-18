@@ -43,6 +43,23 @@ from .sanitize import sanitize_code, sanitize_log
 # picks it and stops worrying.
 SCREENSHOT_MODES = {0, 3}
 
+# What KIND of failure this is -- a separate axis from `category`, which holds
+# the routing decision (noise | known_pattern | novel). The POC prompt kit
+# called both of them "category"; two axes deserve two names, and conflating
+# them would make "was this deduplicated" and "was this a timeout" the same
+# column.
+#
+# The list is closed because it drives colour, filtering and the known-pattern
+# match. A model inventing a nineteenth type would silently fall out of every
+# chart, so anything unrecognised becomes `other` rather than being stored.
+FAILURE_TYPES = {
+    "timeout", "auth", "network", "data_validation", "rate_limit",
+    "ssl", "file_io", "selector", "logic_error", "other",
+}
+
+# Ordered, because "is this worse than that" is the question a manager asks.
+SEVERITIES = ("low", "medium", "high", "critical")
+
 PROMPTS = Path(__file__).parent / "prompts"
 
 # Caps keep one runaway log from blowing the context window and the budget.
@@ -65,7 +82,11 @@ class Analysis:
     suggested_fix: str
     confidence: float
     path: str
-    category: str = "novel"
+    category: str = "novel"          # routing: noise | known_pattern | novel
+    failure_type: str = ""           # taxonomy: timeout | auth | ssl | ...
+    severity: str = ""               # low | medium | high | critical
+    affected_function: str = ""
+    recommendations: str = ""
     notes: str = ""
     inputs_used: tuple[str, ...] = ()
     model_id: str = ""
@@ -143,6 +164,25 @@ def _clamp_confidence(value: object) -> float:
         return 0.0
 
 
+def _failure_type(value) -> str:
+    """Normalise to the closed set, or "" when the model did not say.
+
+    Deliberately not a raise. These fields arrived after thousands of analyses
+    were already stored, and a model that omits one -- or invents one -- must
+    not turn a good root cause into a parse failure. An empty string reads as
+    "not classified" everywhere it is displayed.
+    """
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return ""
+    return text if text in FAILURE_TYPES else "other"
+
+
+def _severity(value) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in SEVERITIES else ""
+
+
 def validate(reply: ModelReply, path: str) -> Analysis:
     """Turn a reply into an Analysis, or into an honest failure.
 
@@ -167,6 +207,10 @@ def validate(reply: ModelReply, path: str) -> Analysis:
         confidence=_clamp_confidence(data.get("confidence")),
         path=path,
         category=str(data.get("category", "novel")),
+        failure_type=_failure_type(data.get("failure_type")),
+        severity=_severity(data.get("severity")),
+        affected_function=str(data.get("affected_function") or "").strip()[:120],
+        recommendations=str(data.get("recommendations") or "").strip()[:2000],
         notes=str(data.get("notes", "")),
         model_id=reply.usage.model,
         usages=[reply.usage],

@@ -55,12 +55,15 @@ def _ddl(sql: str) -> str:
 
 
 def _tables(sql: str) -> set[str]:
-    return set(re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", sql, re.I))
+    # Through _ddl for the same reason everything else here is: a comment
+    # explaining what CREATE TABLE IF NOT EXISTS covers is prose, and reading
+    # the next word as a table name invents three tables that do not exist.
+    return set(re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", _ddl(sql), re.I))
 
 
 def _columns(sql: str, table: str) -> set[str]:
     m = re.search(r"CREATE TABLE (?:IF NOT EXISTS )?" + table + r"\s*\((.*?)\n\);",
-                  sql, re.S | re.I)
+                  _ddl(sql), re.S | re.I)
     if not m:
         return set()
     cols = set()
@@ -210,6 +213,81 @@ def test_the_url_scheme_platforms_emit_is_accepted() -> None:
 
 
 # ----------------------------------------------------------- against a server
+
+def _pg_schema_before_the_taxonomy() -> str:
+    """schema_pg.sql as it was before the failure taxonomy.
+
+    Derived by deleting the four columns and the upgrade section from the
+    current file, so this cannot drift into testing a fiction.
+    """
+    sql = PG_SCHEMA.read_text()
+    sql = sql.split("-- ---------- column upgrades ----------")[0]
+    start = sql.index("    -- The failure taxonomy.")
+    end = sql.index("    recommendations   TEXT,\n") + len("    recommendations   TEXT,\n")
+    return sql[:start] + sql[end:]
+
+
+def test_a_database_made_before_the_taxonomy_is_upgraded_in_place() -> None:
+    """The deployment path, which no amount of fresh-database testing covers.
+
+    This file is re-applied on every boot and CREATE TABLE IF NOT EXISTS does
+    nothing to a table that already exists. Every earlier change added a table,
+    so that was enough; the taxonomy adds columns. Without the ALTER statements
+    the running instance keeps its old `analysis` and every insert fails with
+    "column failure_type does not exist" -- in production, on the first request
+    after a deploy that looked successful.
+    """
+    if not DSN:
+        check("live upgrade check skipped -- set EAGLE_EYES_TEST_DSN", True)
+        return
+
+    import psycopg
+    from eagle_eyes.storage_pg import PostgresDatabase
+
+    old = _pg_schema_before_the_taxonomy()
+    check("the derived pre-taxonomy schema really lacks the columns",
+          "failure_type" not in old and "affected_function" not in old)
+
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("DROP SCHEMA public CASCADE")
+        c.execute("CREATE SCHEMA public")
+        c.execute(old)
+        c.execute("INSERT INTO fingerprint(hash, version, exception_type,"
+                  " normalized_message, code_location, expires_at)"
+                  " VALUES (%s,1,'E','m','l.cs:1','2030-01-01')", ("c" * 64,))
+        c.execute("INSERT INTO analysis(fingerprint_id, path, root_cause,"
+                  " suggested_fix, confidence, expires_at)"
+                  " VALUES (1,'text','old cause','old fix',0.7,'2030-01-01')")
+
+    db = PostgresDatabase(DSN, max_size=2)          # applies the current file
+    try:
+        cols = {r["column_name"] for r in db.conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name='analysis'")}
+        check("the boot adds the taxonomy columns to the existing table",
+              {"failure_type", "severity", "affected_function",
+               "recommendations"} <= cols,
+              str(sorted(cols)))
+
+        row = db.conn.execute("SELECT * FROM analysis").fetchone()
+        check("the diagnosis already stored survives",
+              (row["root_cause"], row["suggested_fix"]) == ("old cause", "old fix"))
+        check("  with the taxonomy NULL rather than invented",
+              row["failure_type"] is None and row["severity"] is None)
+
+        refused = False
+        try:
+            db.conn.execute("UPDATE analysis SET severity='catastrophic'")
+        except psycopg.errors.CheckViolation:
+            refused = True
+        check("and the CHECK came with the column, so a bad severity is refused",
+              refused)
+
+        db.migrate()
+        check("re-applying the upgrade is harmless", True)
+    finally:
+        db.pool.close()
+
 
 def test_against_a_real_server() -> None:
     if not DSN:

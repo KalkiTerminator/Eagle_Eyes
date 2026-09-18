@@ -115,6 +115,18 @@ CREATE TABLE IF NOT EXISTS analysis (
     suggested_fix     TEXT,
     confidence        NUMERIC(3,2) CHECK (confidence BETWEEN 0 AND 1),
     inputs_used       TEXT[] NOT NULL DEFAULT '{}',
+    -- The failure taxonomy. A separate axis from `path` (how it was answered)
+    -- and from the routing class: this is what KIND of failure it was, which
+    -- is what a manager filters and colours by. Nullable throughout, because
+    -- analyses stored before these existed have none of them and an older row
+    -- must still render.
+    failure_type      TEXT CHECK (failure_type IS NULL OR failure_type IN
+                          ('timeout','auth','network','data_validation','rate_limit',
+                           'ssl','file_io','selector','logic_error','other')),
+    severity          TEXT CHECK (severity IS NULL OR severity IN
+                          ('low','medium','high','critical')),
+    affected_function TEXT,
+    recommendations   TEXT,
     is_superseded     BOOLEAN NOT NULL DEFAULT FALSE,
     tokens_in         INTEGER,
     tokens_out        INTEGER,
@@ -332,3 +344,28 @@ CREATE TABLE IF NOT EXISTS scan_schedule (
 );
 
 CREATE INDEX IF NOT EXISTS idx_schedule_due ON scan_schedule (enabled, last_run_at);
+
+-- ---------- column upgrades ----------
+-- This file is applied on every boot, which is what lets a container have no
+-- separate migration step. CREATE TABLE IF NOT EXISTS covers a NEW table; it
+-- does nothing at all to a table that already exists. Every schema change up to
+-- now added a table, so that was enough. The failure taxonomy is the first one
+-- to add COLUMNS, and without the statements below a database created before
+-- them keeps the old `analysis` and every insert fails with "column
+-- failure_type does not exist" -- on the deployed instance, not in a test.
+--
+-- Declared here as well as in the CREATE TABLE above so that a fresh database
+-- and an upgraded one end up identical: PostgreSQL names a column CHECK
+-- <table>_<column>_check whichever way it was declared, and ADD COLUMN IF NOT
+-- EXISTS is a no-op when the CREATE TABLE already made the column.
+-- SQLite's equivalent is storage.MIGRATION_6, which has to rebuild the table
+-- because SQLite cannot add a column with a CHECK that references it.
+
+ALTER TABLE analysis ADD COLUMN IF NOT EXISTS failure_type TEXT
+    CHECK (failure_type IS NULL OR failure_type IN
+        ('timeout','auth','network','data_validation','rate_limit',
+         'ssl','file_io','selector','logic_error','other'));
+ALTER TABLE analysis ADD COLUMN IF NOT EXISTS severity TEXT
+    CHECK (severity IS NULL OR severity IN ('low','medium','high','critical'));
+ALTER TABLE analysis ADD COLUMN IF NOT EXISTS affected_function TEXT;
+ALTER TABLE analysis ADD COLUMN IF NOT EXISTS recommendations TEXT;

@@ -43,3 +43,30 @@ Set confidence honestly:
   0.5-0.8  a likely cause, with a plausible alternative
   0.2-0.5  informed speculation; say what would confirm it
   0.0-0.2  the inputs do not support a diagnosis
+
+CLASSIFY THE FAILURE as well as diagnosing it. Three fields, each from a closed
+list, because they drive what a manager sorts by and what gets coloured red:
+
+  failure_type   timeout | auth | network | data_validation | rate_limit |
+                 ssl | file_io | selector | logic_error | other
+
+                 Pick from the evidence, not from the exception name alone: a
+                 TimeoutException thrown because an element never appeared is
+                 `selector`, not `timeout`. Use `other` only when nothing fits.
+
+  severity       low | medium | high | critical
+
+                 Judge the consequence, not the noise. A bot that stopped
+                 before doing anything is worse than one that processed 98 of
+                 100 records. `critical` means work was lost or nothing ran.
+
+  affected_function
+                 The method the fix belongs in, taken from the stack trace or
+                 the source. Null when the evidence does not identify one --
+                 naming a plausible-sounding function you did not see is worse
+                 than leaving it empty.
+
+  recommendations
+                 Optional. Broader improvements beyond this one fix. Null when
+                 you have nothing to add; padding here makes the real fix
+                 harder to find.

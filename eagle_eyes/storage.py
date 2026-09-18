@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def now() -> str:
@@ -311,8 +311,69 @@ CREATE TABLE scan_schedule (
 CREATE INDEX idx_schedule_due ON scan_schedule (enabled, last_run_at);
 """
 
-MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3,
-                              4: MIGRATION_4, 5: MIGRATION_5}
+MIGRATION_6 = """
+-- Add the failure taxonomy. SQLite cannot add a column with a CHECK that
+-- references it, so the table is rebuilt -- and every existing row keeps its
+-- diagnosis with the four new fields NULL, which is what "we did not classify
+-- this one" should look like.
+CREATE TABLE analysis_new (
+    id                INTEGER PRIMARY KEY,
+    fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
+    source_failure_id INTEGER,             -- provenance only; never dereferenced cross-team (§5)
+    -- Every value analysis.Path_ can produce. It used to list four of the six,
+    -- so an analysis that came back from the dedup store or was skipped for
+    -- want of an exception could not be written down at all -- the two
+    -- outcomes the design is proudest of. A test now derives this list from
+    -- the enum rather than trusting the two to stay in step.
+    path              TEXT NOT NULL CHECK (path IN
+                          ('dedup','template','text','vision','fallback','skipped')),
+    model_id          TEXT,
+    code_mtime        TEXT,                -- pseudo-version; no VCS exists (ARCHITECTURE.md §4.5)
+    root_cause        TEXT,
+    suggested_fix     TEXT,
+    confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
+    inputs_used       TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    -- The failure taxonomy. A separate axis from `path` (how it was answered)
+    -- and from the routing class: this is what KIND of failure it was, which
+    -- is what a manager filters and colours by. Nullable throughout, because
+    -- analyses stored before these existed have none of them and an older row
+    -- must still render.
+    failure_type      TEXT CHECK (failure_type IS NULL OR failure_type IN
+                          ('timeout','auth','network','data_validation','rate_limit',
+                           'ssl','file_io','selector','logic_error','other')),
+    severity          TEXT CHECK (severity IS NULL OR severity IN
+                          ('low','medium','high','critical')),
+    affected_function TEXT,
+    recommendations   TEXT,
+    is_superseded     INTEGER NOT NULL DEFAULT 0 CHECK (is_superseded IN (0,1)),
+    tokens_in         INTEGER,
+    tokens_out        INTEGER,
+    cache_read_tokens INTEGER,
+    image_tokens      INTEGER,
+    cost_usd          REAL,
+    latency_ms        INTEGER,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at        TEXT NOT NULL
+);
+
+INSERT INTO analysis_new (id, fingerprint_id, source_failure_id, path, model_id,
+    code_mtime, root_cause, suggested_fix, confidence, inputs_used, is_superseded,
+    tokens_in, tokens_out, cache_read_tokens, image_tokens, cost_usd, latency_ms,
+    created_at, expires_at)
+SELECT id, fingerprint_id, source_failure_id, path, model_id,
+    code_mtime, root_cause, suggested_fix, confidence, inputs_used, is_superseded,
+    tokens_in, tokens_out, cache_read_tokens, image_tokens, cost_usd, latency_ms,
+    created_at, expires_at FROM analysis;
+DROP TABLE analysis;
+ALTER TABLE analysis_new RENAME TO analysis;
+
+CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DESC)
+    WHERE is_superseded = 0;
+CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4,
+                              5: MIGRATION_5, 6: MIGRATION_6}
 
 
 # How long a writer waits for another writer before giving up. SQLite allows
@@ -579,14 +640,28 @@ class AnalysisRepo(Repository):
             suggested_fix: str, confidence: float, model_id: str = "",
             code_mtime: str | None = None, inputs_used: tuple[str, ...] = (),
             tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0,
-            latency_ms: int = 0, retain_days: int = 365) -> int:
+            latency_ms: int = 0, failure_type: str = "", severity: str = "",
+            affected_function: str = "", recommendations: str = "",
+            retain_days: int = 365) -> int:
+        """Store a diagnosis.
+
+        The four taxonomy fields default to empty and are stored as NULL when
+        empty rather than as "". The column CHECK accepts NULL or a member of
+        the closed list, so "" would be refused -- and an unclassified analysis
+        is a real outcome (a template answer, an older model, a model that
+        omitted the field), not an error.
+        """
         cur = self.db.conn.execute(
             "INSERT INTO analysis(fingerprint_id, path, model_id, code_mtime, root_cause,"
-            " suggested_fix, confidence, inputs_used, tokens_in, tokens_out, cost_usd,"
-            " latency_ms, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " suggested_fix, confidence, inputs_used, failure_type, severity,"
+            " affected_function, recommendations, tokens_in, tokens_out, cost_usd,"
+            " latency_ms, created_at, expires_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fingerprint_id, path, model_id, code_mtime, root_cause, suggested_fix,
-             confidence, self.db.encode_list(inputs_used), tokens_in, tokens_out,
-             cost_usd, latency_ms, now(), _plus(retain_days)))
+             confidence, self.db.encode_list(inputs_used),
+             failure_type or None, severity or None,
+             affected_function or None, recommendations or None,
+             tokens_in, tokens_out, cost_usd, latency_ms, now(), _plus(retain_days)))
         self._audit("create", "analysis", cur.lastrowid)
         return cur.lastrowid
 
@@ -632,7 +707,8 @@ class FailureRepo(Repository):
             return None
 
     SELECT_ = ("SELECT f.*, b.service_line, b.bot_number, b.owner_dev_id,"
-               " a.root_cause, a.confidence, a.suggested_fix, a.path, a.model_id"
+               " a.root_cause, a.confidence, a.suggested_fix, a.path, a.model_id,"
+               " a.failure_type, a.severity, a.affected_function, a.recommendations"
                " FROM failure f JOIN bot b ON b.id=f.bot_id"
                " LEFT JOIN analysis a ON a.id=f.analysis_id")
 

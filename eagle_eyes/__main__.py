@@ -235,7 +235,10 @@ def main(argv: list[str] | None = None) -> int:
                         inputs_used=a.inputs_used,
                         tokens_in=sum(u.input_tokens for u in a.usages),
                         tokens_out=sum(u.output_tokens for u in a.usages),
-                        cost_usd=a.cost_usd, latency_ms=a.latency_ms)
+                        cost_usd=a.cost_usd, latency_ms=a.latency_ms,
+                        failure_type=a.failure_type, severity=a.severity,
+                        affected_function=a.affected_function,
+                        recommendations=a.recommendations)
                 FailureRepo(db, principal).add(
                     bot_id=bot_id, fingerprint_id=fp_id,
                     occurred_at=(c.occurred_at or datetime.now()).isoformat(timespec="seconds"),

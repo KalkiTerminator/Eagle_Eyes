@@ -276,5 +276,51 @@ def test_confidence_is_clamped() -> None:
         check(f"confidence {raw!r} -> {want}", abs(a.confidence - want) < 1e-9, str(a.confidence))
 
 
+def _validated(**fields) -> object:
+    body = {"root_cause": "x", "confidence": 0.5, **fields}
+    return validate(ModelReply(text=json.dumps(body), usage=Usage(model="m")), "text")
+
+
+def test_the_taxonomy_is_normalised_into_the_closed_lists() -> None:
+    """The columns CHECK these values, so anything outside the list is unstorable.
+
+    A model that invents a category must not cost us the diagnosis that came
+    with it -- the right answer is `other`, not a rejected insert.
+    """
+    for raw, want in [("timeout", "timeout"), ("TIMEOUT", "timeout"),
+                      ("  Selector  ", "selector"), ("data-validation", "data_validation"),
+                      ("data validation", "data_validation"),
+                      ("quantum_flux", "other"), ("", ""), (None, "")]:
+        got = _validated(failure_type=raw).failure_type
+        check(f"failure_type {raw!r} -> {want!r}", got == want, repr(got))
+
+    for raw, want in [("critical", "critical"), ("HIGH", "high"),
+                      ("apocalyptic", ""), (None, ""), (7, "")]:
+        got = _validated(severity=raw).severity
+        check(f"severity {raw!r} -> {want!r}", got == want, repr(got))
+
+
+def test_an_omitted_taxonomy_leaves_a_usable_diagnosis() -> None:
+    """The degradation path. A model that answers the old schema, or a template
+    answer that was never classified, must still be a good analysis."""
+    a = _validated()
+    check("the root cause survives", a.root_cause == "x")
+    check("and the confidence is not zeroed", abs(a.confidence - 0.5) < 1e-9)
+    check("with the taxonomy simply empty",
+          (a.failure_type, a.severity, a.affected_function, a.recommendations)
+          == ("", "", "", ""))
+
+
+def test_the_taxonomy_is_bounded_in_length() -> None:
+    """Free-text fields go into the database and onto a page. A model that
+    returns a novel in `recommendations` should not be able to make either
+    unusable."""
+    a = _validated(affected_function="F" * 500, recommendations="R" * 9000)
+    check("affected_function is bounded", len(a.affected_function) == 120,
+          str(len(a.affected_function)))
+    check("recommendations is bounded", len(a.recommendations) == 2000,
+          str(len(a.recommendations)))
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

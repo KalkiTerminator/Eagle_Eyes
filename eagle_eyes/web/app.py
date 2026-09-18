@@ -785,7 +785,10 @@ def _analyse_candidates(state: AppState, account: Account,
                     tokens_in=sum(u.input_tokens for u in analysis.usages),
                     tokens_out=sum(u.output_tokens for u in analysis.usages),
                     cost_usd=cost,
-                    latency_ms=sum(u.latency_ms for u in analysis.usages))
+                    latency_ms=sum(u.latency_ms for u in analysis.usages),
+                    failure_type=analysis.failure_type, severity=analysis.severity,
+                    affected_function=analysis.affected_function,
+                    recommendations=analysis.recommendations)
                 seen[analysis.fingerprint] = analysis_id
                 made += 1
 
@@ -912,7 +915,9 @@ def _analyse_upload(state: AppState, p: Principal, upload, account: Account) -> 
         suggested_fix=analysis.suggested_fix, confidence=analysis.confidence,
         model_id=model_id, inputs_used=tuple(analysis.inputs_used),
         tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
-        latency_ms=latency)
+        latency_ms=latency, failure_type=analysis.failure_type,
+        severity=analysis.severity, affected_function=analysis.affected_function,
+        recommendations=analysis.recommendations)
 
     failure_id = FailureRepo(state.db, p).add(
         bot_id=bot_id, fingerprint_id=fp_id, analysis_id=analysis_id,

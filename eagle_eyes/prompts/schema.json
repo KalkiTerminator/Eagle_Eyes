@@ -2,7 +2,11 @@
   "root_cause": "string - what actually went wrong, in the developer's terms",
   "suggested_fix": "string - specific enough to act on today",
   "confidence": "number 0.0-1.0, honest",
-  "category": "one of: noise | known_pattern | novel",
+  "category": "routing decision - one of: noise | known_pattern | novel",
+  "failure_type": "what KIND of failure - one of: timeout | auth | network | data_validation | rate_limit | ssl | file_io | selector | logic_error | other",
+  "severity": "how much it matters - one of: low | medium | high | critical",
+  "affected_function": "string - the method or function the fix belongs in, or null if the evidence does not identify one",
+  "recommendations": "string - optional broader improvements beyond the immediate fix, or null",
   "needs_screenshot": "boolean - triage only",
   "notes": "string - caveats, missing evidence, or suspected injection attempts"
 }
