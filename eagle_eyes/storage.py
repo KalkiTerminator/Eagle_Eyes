@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def now() -> str:
@@ -372,8 +372,165 @@ CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DE
 CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
 """
 
+MIGRATION_7 = """
+-- Two columns on two tables, both tables rebuilt for the reason migration 6
+-- rebuilt `analysis`: SQLite cannot add a column carrying a CHECK that
+-- references it.
+--
+-- `analysis.category` is the ROUTING class -- noise, known_pattern, novel --
+-- which the engine computes on every analysis and then threw away. Without it
+-- "noise skipped" can only be approximated by path='skipped', and that also
+-- means "no exception found in this log".
+--
+-- `failure.fix_status` is REMEDIATION state, a different question from
+-- `failure.status`, which tracks the pipeline. The POC kit kept this in
+-- localStorage, where it is per-browser, invisible to a manager and outside
+-- every access rule. As a column it is scoped through `bot` like the rest.
+--
+-- Existing rows get category NULL (nobody recorded it) and fix_status
+-- 'pending' (nobody has said otherwise). Both are the honest values.
+--
+-- `failure` is dropped before `analysis` because it references it, and the
+-- runner turns foreign keys off and runs foreign_key_check afterwards --
+-- without that, dropping a parent silently takes its children with it, which
+-- is exactly what an earlier migration did to every screenshot row.
+
+CREATE TABLE analysis_new (
+    id                INTEGER PRIMARY KEY,
+    fingerprint_id    INTEGER NOT NULL REFERENCES fingerprint(id),
+    source_failure_id INTEGER,             -- provenance only; never dereferenced cross-team (§5)
+    -- Every value analysis.Path_ can produce. It used to list four of the six,
+    -- so an analysis that came back from the dedup store or was skipped for
+    -- want of an exception could not be written down at all -- the two
+    -- outcomes the design is proudest of. A test now derives this list from
+    -- the enum rather than trusting the two to stay in step.
+    path              TEXT NOT NULL CHECK (path IN
+                          ('dedup','template','text','vision','fallback','skipped')),
+    model_id          TEXT,
+    code_mtime        TEXT,                -- pseudo-version; no VCS exists (ARCHITECTURE.md §4.5)
+    root_cause        TEXT,
+    suggested_fix     TEXT,
+    confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
+    inputs_used       TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    -- The ROUTING class: what the router decided to DO about this failure. It
+    -- was computed on every analysis and then thrown away, so "noise skipped"
+    -- could only be approximated by path='skipped' -- which also means "no
+    -- exception found in this log". One column makes the headline metric exact
+    -- instead of nearly right.
+    category          TEXT CHECK (category IS NULL OR category IN
+                          ('noise','known_pattern','novel')),
+    -- The failure taxonomy. A separate axis from `path` (how it was answered)
+    -- and from `category` (what we did about it): this is what KIND of failure
+    -- it was, which is what a manager filters and colours by. Nullable
+    -- throughout, because analyses stored before these existed have none of
+    -- them and an older row must still render.
+    failure_type      TEXT CHECK (failure_type IS NULL OR failure_type IN
+                          ('timeout','auth','network','data_validation','rate_limit',
+                           'ssl','file_io','selector','logic_error','other')),
+    severity          TEXT CHECK (severity IS NULL OR severity IN
+                          ('low','medium','high','critical')),
+    affected_function TEXT,
+    recommendations   TEXT,
+    is_superseded     INTEGER NOT NULL DEFAULT 0 CHECK (is_superseded IN (0,1)),
+    tokens_in         INTEGER,
+    tokens_out        INTEGER,
+    cache_read_tokens INTEGER,
+    image_tokens      INTEGER,
+    cost_usd          REAL,
+    latency_ms        INTEGER,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at        TEXT NOT NULL
+);
+
+INSERT INTO analysis_new (
+    id, fingerprint_id, source_failure_id, path, model_id, code_mtime,
+    root_cause, suggested_fix, confidence, inputs_used, failure_type,
+    severity, affected_function, recommendations, is_superseded, tokens_in,
+    tokens_out, cache_read_tokens, image_tokens, cost_usd, latency_ms,
+    created_at, expires_at)
+SELECT
+    id, fingerprint_id, source_failure_id, path, model_id, code_mtime,
+    root_cause, suggested_fix, confidence, inputs_used, failure_type,
+    severity, affected_function, recommendations, is_superseded, tokens_in,
+    tokens_out, cache_read_tokens, image_tokens, cost_usd, latency_ms,
+    created_at, expires_at FROM analysis;
+
+CREATE TABLE failure_new (
+    id                   INTEGER PRIMARY KEY,
+    bot_id               INTEGER NOT NULL REFERENCES bot(id),
+    fingerprint_id       INTEGER NOT NULL REFERENCES fingerprint(id),
+    analysis_id          INTEGER REFERENCES analysis(id),
+    occurred_at          TEXT NOT NULL,
+    ingested_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    status               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','deduped','analyzing','analyzed','failed','suppressed')),
+    was_deduped          INTEGER NOT NULL DEFAULT 0 CHECK (was_deduped IN (0,1)),
+
+    -- provenance: exactly where each input came from
+    log_path             TEXT NOT NULL,     -- UNC path on the VM share
+    screenshot_path      TEXT,              -- UNC path; NOT copied in Mode 0
+    code_path            TEXT,
+    code_mtime           TEXT,
+    code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
+    -- 'log_path' is the normal case: the log names the screenshot file (ARCHITECTURE 4.4).
+    -- 'timestamp' is the fallback when no capture line exists; 'none' means we refused to guess.
+    -- 'uploaded' means a person submitted the image alongside the log through the
+    -- web UI. There is no sibling directory and no capture line to check it
+    -- against, so it is whatever they attached -- recorded as its own method
+    -- rather than borrowed from 'log_path', which would claim the log named it.
+    pairing_method       TEXT CHECK (pairing_method IN
+                             ('log_path','timestamp','none','uploaded')),
+
+    log_sanitized        TEXT,              -- nulled at 90 days
+    code_snapshot        TEXT,              -- nulled at 90 days
+    severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
+    -- Remediation state, which is a different question from `status` above --
+    -- that one tracks the PIPELINE (did we analyse this yet), this one tracks
+    -- the DEVELOPER (have they done anything about it). The POC kit kept this
+    -- in localStorage: per-browser, invisible to a manager, and outside every
+    -- access rule. Here it is a column, so it is scoped by `bot` like
+    -- everything else and a manager can see it.
+    --
+    -- Counted per distinct FINGERPRINT rather than per row: a 203-failure
+    -- spike is one problem, and "203 pending" is a number nobody can act on.
+    fix_status           TEXT NOT NULL DEFAULT 'pending'
+        CHECK (fix_status IN ('pending','reviewed','fixed')),
+    correlation_id       TEXT NOT NULL,
+    content_expires_at   TEXT NOT NULL,
+    expires_at           TEXT NOT NULL
+);
+
+INSERT INTO failure_new (
+    id, bot_id, fingerprint_id, analysis_id, occurred_at, ingested_at,
+    status, was_deduped, log_path, screenshot_path, code_path, code_mtime,
+    code_possibly_stale, pairing_method, log_sanitized, code_snapshot,
+    severity, correlation_id, content_expires_at, expires_at)
+SELECT
+    id, bot_id, fingerprint_id, analysis_id, occurred_at, ingested_at,
+    status, was_deduped, log_path, screenshot_path, code_path, code_mtime,
+    code_possibly_stale, pairing_method, log_sanitized, code_snapshot,
+    severity, correlation_id, content_expires_at, expires_at FROM failure;
+
+DROP TABLE failure;
+DROP TABLE analysis;
+ALTER TABLE analysis_new RENAME TO analysis;
+ALTER TABLE failure_new RENAME TO failure;
+
+CREATE INDEX idx_analysis_fingerprint ON analysis (fingerprint_id, created_at DESC)
+    WHERE is_superseded = 0;
+CREATE INDEX idx_analysis_expiry ON analysis (expires_at);
+CREATE UNIQUE INDEX idx_failure_idempotency ON failure (log_path);
+CREATE INDEX idx_failure_bot_time     ON failure (bot_id, occurred_at DESC);
+CREATE INDEX idx_failure_fingerprint  ON failure (fingerprint_id, occurred_at DESC);
+CREATE INDEX idx_failure_pending      ON failure (status) WHERE status IN ('pending','analyzing');
+CREATE INDEX idx_failure_feed         ON failure (occurred_at DESC);
+CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
+    WHERE log_sanitized IS NOT NULL;
+"""
+
 MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4,
-                              5: MIGRATION_5, 6: MIGRATION_6}
+                              5: MIGRATION_5, 6: MIGRATION_6,
+                              7: MIGRATION_7}
 
 
 # How long a writer waits for another writer before giving up. SQLite allows
@@ -727,28 +884,36 @@ class AnalysisRepo(Repository):
             suggested_fix: str, confidence: float, model_id: str = "",
             code_mtime: str | None = None, inputs_used: tuple[str, ...] = (),
             tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0,
-            latency_ms: int = 0, failure_type: str = "", severity: str = "",
+            latency_ms: int = 0, cache_read_tokens: int = 0, image_tokens: int = 0,
+            category: str = "", failure_type: str = "", severity: str = "",
             affected_function: str = "", recommendations: str = "",
             retain_days: int = 365) -> int:
         """Store a diagnosis.
 
-        The four taxonomy fields default to empty and are stored as NULL when
-        empty rather than as "". The column CHECK accepts NULL or a member of
-        the closed list, so "" would be refused -- and an unclassified analysis
-        is a real outcome (a template answer, an older model, a model that
-        omitted the field), not an error.
+        `category` and the taxonomy fields default to empty and are stored as
+        NULL when empty rather than as "". The column CHECK accepts NULL or a
+        member of the closed list, so "" would be refused -- and an
+        unclassified analysis is a real outcome (a template answer, an older
+        model, a model that omitted the field), not an error.
+
+        `cache_read_tokens` and `image_tokens` have been in the schema since
+        the first commit and were never written: the gateway computes them, the
+        cost calculation consumes them, and nothing carried them this far. Any
+        chart of cache hit rate read an all-NULL column until they were added
+        to this insert.
         """
         cur = self.db.conn.execute(
             "INSERT INTO analysis(fingerprint_id, path, model_id, code_mtime, root_cause,"
-            " suggested_fix, confidence, inputs_used, failure_type, severity,"
-            " affected_function, recommendations, tokens_in, tokens_out, cost_usd,"
-            " latency_ms, created_at, expires_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " suggested_fix, confidence, inputs_used, category, failure_type, severity,"
+            " affected_function, recommendations, tokens_in, tokens_out,"
+            " cache_read_tokens, image_tokens, cost_usd, latency_ms, created_at,"
+            " expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fingerprint_id, path, model_id, code_mtime, root_cause, suggested_fix,
              confidence, self.db.encode_list(inputs_used),
-             failure_type or None, severity or None,
+             category or None, failure_type or None, severity or None,
              affected_function or None, recommendations or None,
-             tokens_in, tokens_out, cost_usd, latency_ms, now(), _plus(retain_days)))
+             tokens_in, tokens_out, cache_read_tokens, image_tokens,
+             cost_usd, latency_ms, now(), _plus(retain_days)))
         self._audit("create", "analysis", cur.lastrowid)
         return cur.lastrowid
 
@@ -796,7 +961,8 @@ class FailureRepo(Repository):
     SELECT_ = ("SELECT f.*, b.service_line, b.bot_number, b.owner_dev_id,"
                " a.root_cause, a.confidence, a.suggested_fix, a.path, a.model_id,"
                " a.failure_type, a.severity, a.affected_function, a.recommendations,"
-               " a.inputs_used, fp.exception_type, fp.normalized_message"
+               " a.inputs_used, a.category, a.cost_usd, a.latency_ms,"
+               " fp.exception_type, fp.normalized_message"
                " FROM failure f JOIN bot b ON b.id=f.bot_id"
                " JOIN fingerprint fp ON fp.id=f.fingerprint_id"
                " LEFT JOIN analysis a ON a.id=f.analysis_id")
@@ -854,6 +1020,33 @@ class FailureRepo(Repository):
             self._audit("read", "failure", failure_id, outcome="deny")
             raise AccessDenied(f"no failure {failure_id} is visible to {self.p.actor}")
         return row
+
+    FIX_STATUSES = ("pending", "reviewed", "fixed")
+
+    def set_fix_status(self, failure_id: int, status: str) -> int:
+        """Mark this PROBLEM, not this row. Returns how many rows changed.
+
+        Every in-scope failure sharing the fingerprint moves together, because
+        that is what a developer means. A 203-failure incident is one problem
+        with one fix; marking the one row somebody happened to open would leave
+        202 saying "pending" and make the workload numbers useless.
+
+        `_scope_sql` is applied to the UPDATE as well as to the initial read --
+        without it, a user who can see one failure of a fingerprint could move
+        every other team's failures of the same fingerprint, and fingerprints
+        are deliberately shared across teams.
+        """
+        if status not in self.FIX_STATUSES:
+            raise ValueError(f"fix status {status!r} is not one of {self.FIX_STATUSES}")
+        row = self.get(failure_id)                  # raises AccessDenied if not theirs
+        where, args = self._scope_sql()
+        cur = self.db.conn.execute(
+            "UPDATE failure SET fix_status = ? WHERE id IN ("
+            f"  SELECT f.id FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f"  WHERE f.fingerprint_id = ?{where})",
+            [status, row["fingerprint_id"], *args])
+        self._audit(f"fix_{status}", "failure", failure_id)
+        return cur.rowcount if cur.rowcount is not None else 0
 
     def visible_count(self) -> int:
         where, args = self._scope_sql()

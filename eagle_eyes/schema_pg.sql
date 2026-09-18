@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS analysis (
     -- is what a manager filters and colours by. Nullable throughout, because
     -- analyses stored before these existed have none of them and an older row
     -- must still render.
+    category          TEXT CHECK (category IS NULL OR category IN
+                          ('noise','known_pattern','novel')),
     failure_type      TEXT CHECK (failure_type IS NULL OR failure_type IN
                           ('timeout','auth','network','data_validation','rate_limit',
                            'ssl','file_io','selector','logic_error','other')),
@@ -166,6 +168,8 @@ CREATE TABLE IF NOT EXISTS failure (
     log_sanitized        TEXT,
     code_snapshot        TEXT,
     severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
+    fix_status           TEXT NOT NULL DEFAULT 'pending'
+        CHECK (fix_status IN ('pending','reviewed','fixed')),
     correlation_id       TEXT NOT NULL,
     content_expires_at   TIMESTAMPTZ NOT NULL,
     expires_at           TIMESTAMPTZ NOT NULL
@@ -369,3 +373,14 @@ ALTER TABLE analysis ADD COLUMN IF NOT EXISTS severity TEXT
     CHECK (severity IS NULL OR severity IN ('low','medium','high','critical'));
 ALTER TABLE analysis ADD COLUMN IF NOT EXISTS affected_function TEXT;
 ALTER TABLE analysis ADD COLUMN IF NOT EXISTS recommendations TEXT;
+
+-- Schema 7. `analysis.category` is the routing class the router already
+-- computed and discarded; `failure.fix_status` is remediation state, which the
+-- POC kit kept in localStorage. Same reasoning as the block above: an existing
+-- database never sees a CREATE TABLE IF NOT EXISTS, so without these two the
+-- deployed instance keeps the old tables and every insert naming the new
+-- columns fails.
+ALTER TABLE analysis ADD COLUMN IF NOT EXISTS category TEXT
+    CHECK (category IS NULL OR category IN ('noise','known_pattern','novel'));
+ALTER TABLE failure ADD COLUMN IF NOT EXISTS fix_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (fix_status IN ('pending','reviewed','fixed'));

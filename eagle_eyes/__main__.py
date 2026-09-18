@@ -242,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
                         tokens_in=sum(u.input_tokens for u in a.usages),
                         tokens_out=sum(u.output_tokens for u in a.usages),
                         cost_usd=a.cost_usd, latency_ms=a.latency_ms,
+                        cache_read_tokens=sum(u.cache_read_tokens for u in a.usages),
+                        image_tokens=sum(u.image_tokens for u in a.usages),
+                        category=a.category,
                         failure_type=a.failure_type, severity=a.severity,
                         affected_function=a.affected_function,
                         recommendations=a.recommendations)

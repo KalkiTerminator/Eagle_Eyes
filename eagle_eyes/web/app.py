@@ -902,6 +902,9 @@ def _analyse_candidates(state: AppState, account: Account,
                     tokens_out=sum(u.output_tokens for u in analysis.usages),
                     cost_usd=cost,
                     latency_ms=sum(u.latency_ms for u in analysis.usages),
+                    cache_read_tokens=sum(u.cache_read_tokens for u in analysis.usages),
+                    image_tokens=sum(u.image_tokens for u in analysis.usages),
+                    category=analysis.category,
                     failure_type=analysis.failure_type, severity=analysis.severity,
                     affected_function=analysis.affected_function,
                     recommendations=analysis.recommendations)
@@ -1037,7 +1040,10 @@ def _analyse_upload(state: AppState, p: Principal, upload, account: Account) -> 
         suggested_fix=analysis.suggested_fix, confidence=analysis.confidence,
         model_id=model_id, inputs_used=tuple(analysis.inputs_used),
         tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
-        latency_ms=latency, failure_type=analysis.failure_type,
+        latency_ms=latency,
+        cache_read_tokens=sum(u.cache_read_tokens for u in analysis.usages),
+        image_tokens=sum(u.image_tokens for u in analysis.usages),
+        category=analysis.category, failure_type=analysis.failure_type,
         severity=analysis.severity, affected_function=analysis.affected_function,
         recommendations=analysis.recommendations)
 

@@ -96,11 +96,18 @@ CREATE TABLE analysis (
     suggested_fix     TEXT,
     confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
     inputs_used       TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    -- The ROUTING class: what the router decided to DO about this failure. It
+    -- was computed on every analysis and then thrown away, so "noise skipped"
+    -- could only be approximated by path='skipped' -- which also means "no
+    -- exception found in this log". One column makes the headline metric exact
+    -- instead of nearly right.
+    category          TEXT CHECK (category IS NULL OR category IN
+                          ('noise','known_pattern','novel')),
     -- The failure taxonomy. A separate axis from `path` (how it was answered)
-    -- and from the routing class: this is what KIND of failure it was, which
-    -- is what a manager filters and colours by. Nullable throughout, because
-    -- analyses stored before these existed have none of them and an older row
-    -- must still render.
+    -- and from `category` (what we did about it): this is what KIND of failure
+    -- it was, which is what a manager filters and colours by. Nullable
+    -- throughout, because analyses stored before these existed have none of
+    -- them and an older row must still render.
     failure_type      TEXT CHECK (failure_type IS NULL OR failure_type IN
                           ('timeout','auth','network','data_validation','rate_limit',
                            'ssl','file_io','selector','logic_error','other')),
@@ -154,6 +161,17 @@ CREATE TABLE failure (
     log_sanitized        TEXT,              -- nulled at 90 days
     code_snapshot        TEXT,              -- nulled at 90 days
     severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
+    -- Remediation state, which is a different question from `status` above --
+    -- that one tracks the PIPELINE (did we analyse this yet), this one tracks
+    -- the DEVELOPER (have they done anything about it). The POC kit kept this
+    -- in localStorage: per-browser, invisible to a manager, and outside every
+    -- access rule. Here it is a column, so it is scoped by `bot` like
+    -- everything else and a manager can see it.
+    --
+    -- Counted per distinct FINGERPRINT rather than per row: a 203-failure
+    -- spike is one problem, and "203 pending" is a number nobody can act on.
+    fix_status           TEXT NOT NULL DEFAULT 'pending'
+        CHECK (fix_status IN ('pending','reviewed','fixed')),
     correlation_id       TEXT NOT NULL,
     content_expires_at   TEXT NOT NULL,
     expires_at           TEXT NOT NULL

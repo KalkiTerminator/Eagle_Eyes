@@ -52,14 +52,39 @@ def test_schema_matches_the_doc() -> None:
           blocks[0].strip() == in_file[ddl_start:].strip())
 
 
+def _cut(sql: str, start: str, end: str) -> str:
+    """Delete the block from `start` through the end of the line containing `end`.
+
+    Used to walk the schema backwards through its versions. Each helper below
+    derives from the NEXT one up rather than from the current file, because
+    earlier migrations rebuild tables with `INSERT ... SELECT *` -- handing that
+    SELECT a column the table it was written against never had fails with a
+    column-count mismatch, which is the test correctly calling the derivation a
+    fiction.
+    """
+    i = sql.index(start)
+    j = sql.index(end, i) + len(end)
+    return sql[:i] + sql[j:]
+
+
+def _v6_schema() -> str:
+    """schema.sql as version 6 looked -- before `analysis.category` and
+    `failure.fix_status`."""
+    sql = SCHEMA_PATH.read_text()
+    sql = _cut(sql, "    -- The ROUTING class:",
+               "                          ('noise','known_pattern','novel')),\n")
+    return _cut(sql, "    -- Remediation state,",
+                "        CHECK (fix_status IN ('pending','reviewed','fixed')),\n")
+
+
 def _v5_schema() -> str:
     """schema.sql as version 5 looked -- before the failure taxonomy.
 
-    Derived by deleting the four taxonomy columns from the current file rather
-    than pasting a copy, so that adding a fifth one without extending
-    migration 6 makes this fail instead of quietly skipping it.
+    Derived by deleting the four taxonomy columns rather than pasting a copy,
+    so that adding a fifth one without extending migration 6 makes this fail
+    instead of quietly skipping it.
     """
-    full = SCHEMA_PATH.read_text()
+    full = _v6_schema()
     start = full.index("    -- The failure taxonomy.")
     end = full.index("    recommendations   TEXT,\n") + len("    recommendations   TEXT,\n")
     return full[:start] + full[end:]
@@ -231,6 +256,88 @@ def test_migration_6_lands_where_a_fresh_schema_does() -> None:
 
         check("and no foreign key is left dangling",
               migrated.conn.execute("PRAGMA foreign_key_check").fetchall() == [])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_migration_7_lands_where_a_fresh_schema_does() -> None:
+    """Two tables rebuilt, and the child of one of them must survive it.
+
+    `failure` references `analysis` and `screenshot` references `failure`, so
+    this migration drops a parent that has both a parent and a child. An
+    earlier migration did exactly that with foreign keys ON and silently
+    deleted every screenshot row -- a data loss nothing reported. The runner
+    turns them off and runs foreign_key_check afterwards; this proves it.
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        v6 = _v6_schema()
+        ddl = re.sub(r"--[^\n]*", "", v6)          # the prose still mentions both
+        check("the derived v6 schema really lacks both columns",
+              "category" not in ddl and "fix_status" not in ddl)
+
+        con = sqlite3.connect(str(d / "old.db"))
+        con.executescript(v6)
+        con.execute("INSERT INTO bot(service_line, bot_number) VALUES ('SL','B1')")
+        con.execute("INSERT INTO fingerprint(hash, version, exception_type,"
+                    " normalized_message, code_location, expires_at)"
+                    " VALUES (?,1,'E','m','l.cs:1','2030-01-01')", ("d" * 64,))
+        con.execute("INSERT INTO analysis(fingerprint_id, path, root_cause,"
+                    " suggested_fix, confidence, expires_at)"
+                    " VALUES (1,'text','old cause','old fix',0.7,'2030-01-01')")
+        con.execute("INSERT INTO failure(bot_id, fingerprint_id, analysis_id,"
+                    " occurred_at, log_path, correlation_id, content_expires_at,"
+                    " expires_at) VALUES (1,1,1,'2026-01-01','/l.txt','c',"
+                    "'2030-01-01','2030-01-01')")
+        con.execute("INSERT INTO screenshot(failure_id, unc_path, processing_mode)"
+                    " VALUES (1,'/s.png',3)")
+        con.execute("PRAGMA user_version = 6")
+        con.commit()
+        con.close()
+
+        migrated = Database(d / "old.db")
+        fresh = Database(d / "new.db")
+
+        v = migrated.conn.execute("PRAGMA user_version").fetchone()[0]
+        check("migration 7 stamps the new version", v == SCHEMA_VERSION, str(v))
+
+        def shape(db):
+            out = {}
+            for r in db.conn.execute(
+                    "SELECT type, name, sql FROM sqlite_master"
+                    " WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"):
+                sql = re.sub(r"--[^\n]*", "", r["sql"] or "")
+                sql = re.sub(r'"(\w+)"', r"\1", sql)
+                out[(r["type"], r["name"])] = re.sub(r"\s+", " ", sql).strip()
+            return out
+
+        a, b = shape(migrated), shape(fresh)
+        check("migration 7 leaves the same set of objects", set(a) == set(b),
+              str(set(a) ^ set(b)))
+        differing = sorted(k for k in set(a) & set(b) if a[k] != b[k])
+        check("  and each is defined identically", not differing, str(differing))
+
+        row = migrated.conn.execute("SELECT * FROM analysis").fetchone()
+        check("the diagnosis survives both rebuilds",
+              row["root_cause"] == "old cause", str(row["root_cause"]))
+        check("  with the routing class NULL rather than guessed",
+              row["category"] is None, str(row["category"]))
+        f = migrated.conn.execute("SELECT * FROM failure").fetchone()
+        check("the failure survives", f["log_path"] == "/l.txt", str(f["log_path"]))
+        check("  and starts as pending, which is what nobody having acted means",
+              f["fix_status"] == "pending", str(f["fix_status"]))
+
+        n = migrated.conn.execute("SELECT COUNT(*) n FROM screenshot").fetchone()["n"]
+        check("dropping a parent does not cascade its children away", n == 1, str(n))
+        check("and no foreign key is left dangling",
+              migrated.conn.execute("PRAGMA foreign_key_check").fetchall() == [])
+
+        refused = False
+        try:
+            migrated.conn.execute("UPDATE failure SET fix_status='done'")
+        except sqlite3.IntegrityError:
+            refused = True
+        check("a fix_status outside the closed list is refused", refused)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
