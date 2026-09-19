@@ -255,11 +255,123 @@ def test_every_analytics_query_is_scoped() -> None:
                   sum(n for _, n in repo.path_breakdown()) <=
                   everything.stats()["failures"])
 
+            # The metrics added with the routing dashboard. Same rule: a count
+            # is data, and "how many critical failures does that team have"
+            # is a question about rows you cannot open.
+            total = everything.stats()["failures"]
+            check(f"{label}: routing_breakdown is scoped",
+                  sum(n for _, n in repo.routing_breakdown()) <= total)
+            check(f"{label}: severity_breakdown is scoped",
+                  sum(n for _, n in repo.severity_breakdown()) <= total)
+            check(f"{label}: failure_type_breakdown is scoped",
+                  sum(n for _, n in repo.failure_type_breakdown()) <= total)
+            check(f"{label}: efficiency is scoped",
+                  repo.efficiency()["analyses"] <= total)
+            check(f"{label}: notifications is scoped",
+                  repo.notifications()["sent"] <=
+                  everything.notifications()["sent"])
+            check(f"{label}: fix_status_counts is scoped",
+                  sum(repo.fix_status_counts().values()) <= total)
+            check(f"{label}: by_developer is scoped",
+                  all("CLAIMS" not in str(r) for r in repo.by_developer()))
+            check(f"{label}: activity is scoped",
+                  all(r["service_line"] != "CLAIMS_PROC" for r in repo.activity()))
+
         blind = FailureRepo(db, Principal("nobody@x.com", USER))
         check("someone with no access sees nothing at all, in every query",
               blind.daily_counts(30) == [] and blind.top_fingerprints() == []
               and blind.by_service_line() == [] and blind.by_bot() == []
-              and sum(n for _, n in blind.confidence_buckets()) == 0)
+              and sum(n for _, n in blind.confidence_buckets()) == 0
+              and blind.routing_breakdown() == [] and blind.severity_breakdown() == []
+              and blind.failure_type_breakdown() == [] and blind.by_developer() == []
+              and blind.activity() == []
+              and blind.efficiency()["analyses"] == 0
+              and blind.notifications() == {"sent": 0, "suppressed": 0}
+              and sum(blind.fix_status_counts().values()) == 0)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_routing_savings_buckets_do_not_overlap() -> None:
+    """The avoided counts must not exceed the failures they are counted from.
+
+    They did. Deduplicated failures point at an analysis that may itself have
+    been a template answer, so counting `was_deduped` and `path='template'`
+    separately and adding them reported 481 avoided calls against 260 failures
+    -- a number that would have gone on a manager's dashboard and been believed.
+    The buckets are computed in one pass, in priority order, and are mutually
+    exclusive.
+    """
+    db, d = _world()
+    try:
+        repo = FailureRepo(db, Principal("root@x.com", ADMIN))
+        s = repo.routing_savings()
+        check("avoided plus analysed never exceeds the total",
+              s["calls_avoided"] + s["analysed"] <= s["total"],
+              f"{s['calls_avoided']} + {s['analysed']} > {s['total']}")
+        check("  and no single bucket exceeds it either",
+              all(v <= s["total"] for v in s["avoided"].values()), str(s["avoided"]))
+        check("the total agrees with the visible count",
+              s["total"] == repo.visible_count(), str(s["total"]))
+
+        # Without a priced call there is no basis, and the estimate says so
+        # rather than reaching for a list price.
+        if s["spend_usd"] == 0:
+            check("no spend means no basis, and no invented figure",
+                  not s["have_basis"] and s["usd"] == 0.0, str(s))
+
+        scoped = FailureRepo(db, Principal("m@x.com", MANAGER,
+                                           frozenset({"FINANCE_AP"})))
+        check("and the whole estimate is scoped",
+              scoped.routing_savings()["total"] < s["total"],
+              f"{scoped.routing_savings()['total']} vs {s['total']}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_fix_status_is_set_per_problem_and_stays_in_scope() -> None:
+    """A fix applies to the problem, not to the row somebody happened to open.
+
+    And fingerprints are deliberately shared across teams, so the UPDATE has to
+    carry the scope clause too -- otherwise seeing one failure of a fingerprint
+    would let you move every other team's failures of the same one.
+    """
+    db, d = _world()
+    try:
+        admin = FailureRepo(db, Principal("root@x.com", ADMIN))
+        rows = admin.recent(limit=50)
+        target = rows[0]
+        same = [r for r in rows if r["fingerprint_id"] == target["fingerprint_id"]]
+
+        moved = admin.set_fix_status(target["id"], "fixed")
+        check("every failure sharing the fingerprint moves together",
+              moved >= len(same), f"{moved} moved, {len(same)} share it")
+        after = {r["fix_status"] for r in admin.recent(limit=50)
+                 if r["fingerprint_id"] == target["fingerprint_id"]}
+        check("  and they all read the same afterwards", after == {"fixed"}, str(after))
+
+        counts = admin.fix_status_counts()
+        check("counted per problem, not per occurrence",
+              sum(counts.values()) == admin.stats()["fingerprints"],
+              f"{sum(counts.values())} vs {admin.stats()['fingerprints']}")
+
+        refused = False
+        try:
+            admin.set_fix_status(target["id"], "done")
+        except ValueError:
+            refused = True
+        check("a status outside the closed list is refused", refused)
+
+        stranger = FailureRepo(db, Principal("nobody@x.com", USER))
+        denied = False
+        try:
+            stranger.set_fix_status(target["id"], "pending")
+        except AccessDenied:
+            denied = True
+        check("someone who cannot see the failure cannot move it", denied)
+        still = {r["fix_status"] for r in admin.recent(limit=50)
+                 if r["fingerprint_id"] == target["fingerprint_id"]}
+        check("  and nothing changed when they tried", still == {"fixed"}, str(still))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

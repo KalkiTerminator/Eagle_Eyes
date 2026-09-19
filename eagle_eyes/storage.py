@@ -1157,6 +1157,204 @@ class FailureRepo(Repository):
             f" ORDER BY n DESC", args).fetchall()
         return [(r["p"], r["n"]) for r in rows]
 
+    def routing_breakdown(self) -> list[tuple[str, int]]:
+        """What the router DECIDED, which is not the same as how it answered.
+
+        `path_breakdown` says how each analysis was reached -- dedup, template,
+        text. This says what the router concluded about the failure: noise not
+        worth a developer's time, a known pattern, or something novel. The two
+        together are the whole cost argument.
+        """
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT COALESCE(a.category, 'unclassified') c, COUNT(*) n"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} GROUP BY COALESCE(a.category, 'unclassified')"
+            f" ORDER BY n DESC", args).fetchall()
+        return [(r["c"], r["n"]) for r in rows]
+
+    def severity_breakdown(self) -> list[tuple[str, int]]:
+        """Worst first, and only rows a model actually classified.
+
+        Unclassified rows are excluded rather than bucketed as 'low': a
+        template answer and an older analysis both have NULL here, and calling
+        them low severity would invent a judgement nobody made.
+        """
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT a.severity s, COUNT(*) n"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} AND a.severity IS NOT NULL"
+            f" GROUP BY a.severity", args).fetchall()
+        order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        return sorted(((r["s"], r["n"]) for r in rows),
+                      key=lambda kv: order.get(kv[0], 9))
+
+    def failure_type_breakdown(self, limit: int = 10) -> list[tuple[str, int]]:
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT a.failure_type t, COUNT(*) n"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} AND a.failure_type IS NOT NULL"
+            f" GROUP BY a.failure_type ORDER BY n DESC LIMIT ?",
+            [*args, max(1, min(limit, 50))]).fetchall()
+        return [(r["t"].replace("_", " "), r["n"]) for r in rows]
+
+    def efficiency(self) -> dict[str, Any]:
+        """The numbers that say what the routing is worth.
+
+        `avg_latency_ms` counts only analyses that actually called a model.
+        Dedup hits and template answers store 0, and averaging those in would
+        report a system that answers in a few milliseconds -- true, and a lie
+        about what a diagnosis costs in time.
+
+        `cache_hit_rate` is cached input tokens over all input tokens. It read
+        an all-NULL column until `cache_read_tokens` was threaded into the
+        insert, which is why it is stated here rather than assumed elsewhere.
+        """
+        where, args = self._scope_sql()
+        base = (f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+                f" JOIN analysis a ON a.id=f.analysis_id WHERE TRUE{where}")
+        row = self.db.conn.execute(
+            f"SELECT COUNT(*) n,"
+            f" COALESCE(SUM(a.tokens_in), 0) tin,"
+            f" COALESCE(SUM(a.cache_read_tokens), 0) tcache,"
+            f" COALESCE(SUM(a.latency_ms), 0) lat_all,"
+            f" COALESCE(SUM(CASE WHEN a.latency_ms > 0 THEN a.latency_ms ELSE 0 END), 0) lat,"
+            f" COALESCE(SUM(CASE WHEN a.latency_ms > 0 THEN 1 ELSE 0 END), 0) timed"
+            f"{base}", args).fetchone()
+        tin = float(row["tin"] or 0)
+        timed = int(row["timed"] or 0)
+        return {
+            "analyses": int(row["n"] or 0),
+            "tokens_in": tin,
+            "cache_read_tokens": float(row["tcache"] or 0),
+            "cache_hit_rate": (float(row["tcache"] or 0) / tin) if tin else 0.0,
+            "avg_latency_ms": (float(row["lat"] or 0) / timed) if timed else 0.0,
+            "timed_analyses": timed,
+        }
+
+    def notifications(self) -> dict[str, int]:
+        """How many diagnoses were mailed, and how many were held back.
+
+        Scoped through fingerprint -> failure -> bot, because
+        `notification_state` is keyed on a fingerprint and fingerprints are
+        deliberately shared across teams. One row is one mail sent; the
+        suppressed count is how many repeats it stood in for.
+        """
+        where, args = self._scope_sql()
+        row = self.db.conn.execute(
+            f"SELECT COUNT(*) sent, COALESCE(SUM(ns.suppressed_count), 0) held"
+            f" FROM notification_state ns"
+            f" WHERE ns.fingerprint_id IN ("
+            f"   SELECT f.fingerprint_id FROM failure f"
+            f"   JOIN bot b ON b.id=f.bot_id WHERE TRUE{where})", args).fetchone()
+        return {"sent": int(row["sent"] or 0), "suppressed": int(row["held"] or 0)}
+
+    def fix_status_counts(self) -> dict[str, int]:
+        """Per distinct PROBLEM, not per failure.
+
+        A 203-failure incident is one problem with one fix. Counting rows would
+        report 203 pending and make the number unusable -- which is exactly why
+        `set_fix_status` moves every failure sharing a fingerprint together.
+        """
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT f.fix_status s, COUNT(DISTINCT f.fingerprint_id) n"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" WHERE TRUE{where} GROUP BY f.fix_status", args).fetchall()
+        out = {k: 0 for k in self.FIX_STATUSES}
+        out.update({r["s"]: r["n"] for r in rows})
+        return out
+
+    def routing_savings(self) -> dict[str, Any]:
+        """What the routing layer avoided, against analysing every failure.
+
+        The buckets are MUTUALLY EXCLUSIVE and computed in one pass, in
+        priority order, because they overlap in the data: a deduplicated
+        failure points at an analysis that may itself have been a template
+        answer, so counting `was_deduped` and `path='template'` separately and
+        adding them reports more avoided calls than there are failures. It did,
+        on the seeded estate: 230 + 251 = 481 against 260 failures.
+
+        `analysed` is the only bucket that cost anything -- the text and vision
+        paths. Everything else is a failure that never reached a model, and the
+        reason it did not is which bucket it lands in.
+        """
+        where, args = self._scope_sql()
+        row = self.db.conn.execute(
+            f"SELECT"
+            f" COUNT(*) total,"
+            f" COALESCE(SUM(CASE WHEN f.was_deduped = TRUE THEN 1 ELSE 0 END), 0) deduped,"
+            f" COALESCE(SUM(CASE WHEN f.was_deduped = FALSE AND a.path = 'template'"
+            f"      THEN 1 ELSE 0 END), 0) templated,"
+            f" COALESCE(SUM(CASE WHEN f.was_deduped = FALSE AND a.path <> 'template'"
+            f"      AND a.category = 'noise' THEN 1 ELSE 0 END), 0) noise,"
+            f" COALESCE(SUM(CASE WHEN f.was_deduped = FALSE"
+            f"      AND a.path IN ('text','vision') THEN 1 ELSE 0 END), 0) analysed,"
+            f" COALESCE(SUM(CASE WHEN a.path IN ('text','vision')"
+            f"      THEN a.cost_usd ELSE 0 END), 0) spend"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where}", args).fetchone()
+
+        total = int(row["total"] or 0)
+        analysed = int(row["analysed"] or 0)
+        spend = float(row["spend"] or 0)
+        avoided = {"deduplicated": int(row["deduped"] or 0),
+                   "known pattern": int(row["templated"] or 0),
+                   "classified as noise": int(row["noise"] or 0)}
+        calls_avoided = sum(avoided.values())
+
+        # The basis is the mean cost of the calls ACTUALLY MADE HERE. Without a
+        # priced call there is nothing to multiply by, and reaching for a list
+        # price or a figure from the cost model would describe somebody else's
+        # deployment. Zero, and the page says why.
+        mean = (spend / analysed) if (analysed and spend > 0) else 0.0
+        return {"total": total, "analysed": analysed, "spend_usd": spend,
+                "avoided": avoided, "calls_avoided": calls_avoided,
+                "mean_usd": mean, "usd": calls_avoided * mean,
+                "have_basis": mean > 0}
+
+    def by_developer(self, limit: int = 12) -> list[dict]:
+        """Workload per owner: problems, not occurrences.
+
+        A bot with no owner is reported as unassigned rather than dropped --
+        an unowned bot is the thing a manager most needs to see, and silently
+        omitting it is how it stays unowned.
+        """
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT COALESCE(d.email, 'unassigned') owner,"
+            f" COUNT(*) failures,"
+            f" COUNT(DISTINCT f.fingerprint_id) problems,"
+            f" COUNT(DISTINCT CASE WHEN f.fix_status = 'pending'"
+            f"      THEN f.fingerprint_id END) pending,"
+            f" MAX(f.occurred_at) last_seen"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN developer d ON d.id = b.owner_dev_id"
+            f" WHERE TRUE{where}"
+            f" GROUP BY COALESCE(d.email, 'unassigned')"
+            f" ORDER BY problems DESC, failures DESC LIMIT ?",
+            [*args, max(1, min(limit, 100))]).fetchall()
+        return [dict(r) for r in rows]
+
+    def activity(self, limit: int = 20) -> list[dict]:
+        """The most recent failures, with how each was answered and what it cost."""
+        where, args = self._scope_sql()
+        rows = self.db.conn.execute(
+            f"SELECT f.id, f.occurred_at, f.fix_status, b.service_line, b.bot_number,"
+            f" COALESCE(a.path, 'not analysed') path, a.category, a.severity,"
+            f" COALESCE(a.cost_usd, 0) cost"
+            f" FROM failure f JOIN bot b ON b.id=f.bot_id"
+            f" LEFT JOIN analysis a ON a.id=f.analysis_id"
+            f" WHERE TRUE{where} ORDER BY f.occurred_at DESC LIMIT ?",
+            [*args, max(1, min(limit, 100))]).fetchall()
+        return [dict(r) for r in rows]
+
     def by_service_line(self) -> list[dict]:
         """Per service line: volume, distinct problems, spend. The manager view."""
         where, args = self._scope_sql()
