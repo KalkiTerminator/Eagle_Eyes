@@ -39,6 +39,92 @@
   </div>
 </div>
 
+<div class="grid g2" style="margin-top:16px">
+  <div class="card">
+    <h3>Budget <span class="hint">the deployment's bill, not scoped to you</span></h3>
+    {{ budget_svg|safe }}
+    <div style="margin-top:18px">{{ lifetime_svg|safe }}</div>
+    <p class="tiny muted" style="margin:14px 0 0">
+      These two are the whole account, unscoped — a budget is a fact about the
+      deployment, not about who is looking at it. Every other number on this page
+      is scoped to what you can see. Both caps refuse new analyses when reached;
+      neither bills past them.
+    </p>
+  </div>
+  <div class="card">
+    <h3>How each failure was routed</h3>
+    {{ routing_svg|safe }}
+    <p class="tiny muted" style="margin:14px 0 0">
+      Smart routing avoided <b>{{ routing.calls_avoided }}</b> model calls:
+      {{ routing.avoided['deduplicated'] }} repeats,
+      {{ routing.avoided['known pattern'] }} known patterns,
+      {{ routing.avoided['classified as noise'] }} classified as noise.
+      {% if routing.have_basis %}
+        At {{ routing.mean_usd|money }} each — the average of the
+        {{ routing.analysed }} calls actually made here — that is about
+        <b>{{ routing.usd|money }}</b> not spent.
+      {% else %}
+        No priced call has been made on this instance yet, so there is nothing to
+        price them against and the money is left blank rather than guessed.
+      {% endif %}
+      The count is measured; the money is an estimate, because the avoided work
+      was never done and there is no invoice for it.
+    </p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>Who carries the work <span class="hint">problems, not occurrences</span></h3>
+  {% if developers %}
+  <table>
+    <tr><th>Developer</th><th class="num">Problems</th><th class="num">Pending</th>
+        <th class="num">Failures</th><th>Last seen</th></tr>
+    {% for d in developers %}
+    <tr>
+      <td>{{ d.owner }}</td>
+      <td class="num">{{ d.problems }}</td>
+      <td class="num">
+        {% if d.pending > 5 %}
+          <span class="sev warning" title="more than five problems still pending"><i></i>{{ d.pending }} &middot; heavy</span>
+        {% else %}{{ d.pending }}{% endif %}
+      </td>
+      <td class="num">{{ d.failures }}</td>
+      <td class="mono tiny">{{ d.last_seen }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="tiny muted" style="margin:12px 0 0">
+    Counted per distinct problem. A bot nobody owns shows as <b>unassigned</b>
+    rather than being left out — an unowned bot is the thing most worth seeing,
+    and dropping it from the table is how it stays unowned. More than five
+    pending problems reads <b>heavy</b> — the word is there because the colour
+    alone is not something every reader can use.
+  </p>
+  {% else %}
+  <p class="muted small">No failures are visible to you yet.</p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>Recent activity</h3>
+  {% if feed %}
+  <ul class="feed">
+    {% for f in feed %}
+    <li>
+      <span class="sev {{ {'critical':'critical','high':'serious','medium':'warning','low':'good'}.get(f.severity, 'good') }}"><i></i></span>
+      <span class="when mono">{{ f.occurred_at }}</span>
+      <span class="grow">{{ f.service_line }}/{{ f.bot_number }}
+        <span class="muted">— {{ 'library' if f.path == 'template' else f.path }}</span></span>
+      <span class="tiny muted">{{ f.fix_status }}</span>
+      <span class="mono tiny">{{ (f.cost or 0)|money }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted small">Nothing yet.</p>
+  {% endif %}
+</div>
+
 <div class="card" style="margin-top:16px">
   <h3>Bots, worst first</h3>
   {% if bots %}

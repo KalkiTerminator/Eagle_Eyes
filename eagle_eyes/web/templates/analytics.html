@@ -68,6 +68,63 @@
   </p>
 </div>
 
+<div class="card" style="margin-top:16px">
+  <h3>What the router decided <span class="hint">a different question from how it answered</span></h3>
+  {{ routing_svg|safe }}
+  <p class="tiny muted" style="margin-top:12px">
+    <b>noise</b> was not worth a developer's attention. <b>known pattern</b> was
+    recognised and answered from the library for nothing. <b>novel</b> needed a
+    real diagnosis. <b>unclassified</b> is an analysis stored before this was
+    recorded — left as its own bucket rather than folded into one of the others,
+    because guessing which would be inventing a decision nobody made.
+  </p>
+</div>
+
+<div class="grid g2" style="margin-top:16px">
+  <div class="card">
+    <h3>How bad <span class="hint">only what a model actually classified</span></h3>
+    {{ severity_svg|safe }}
+    <p class="tiny muted" style="margin-top:12px">
+      Unclassified analyses are left out rather than counted as low. A template
+      answer and anything stored before the taxonomy existed both have no
+      severity, and calling those "low" would invent a judgement nobody made.
+    </p>
+  </div>
+  <div class="card">
+    <h3>What kind of failure</h3>
+    {{ types_svg|safe }}
+  </div>
+</div>
+
+<div class="grid g4" style="margin-top:16px">
+  <div class="tile">
+    <div class="k">Emails sent</div>
+    <div class="n">{{ notifications.sent }}</div>
+    <div class="note">{{ notifications.suppressed }} repeat{{ '' if notifications.suppressed == 1 else 's' }}
+      suppressed rather than delivered — which is what keeps this sender out of a junk folder.</div>
+  </div>
+  <div class="tile">
+    <div class="k">Problems pending</div>
+    <div class="n">{{ fixes['pending'] }}</div>
+    <div class="note">{{ fixes['reviewed'] }} reviewed, {{ fixes['fixed'] }} fixed.
+      Counted per problem, not per occurrence.</div>
+  </div>
+  <div class="tile">
+    <div class="k">Average time</div>
+    <div class="n">{% if efficiency.avg_latency_ms %}{{ '%.1f'|format(efficiency.avg_latency_ms / 1000) }}s{% else %}—{% endif %}</div>
+    <div class="note">{% if efficiency.timed_analyses %}Over the {{ efficiency.timed_analyses }}
+      analys{{ 'is' if efficiency.timed_analyses == 1 else 'es' }} that called a model.
+      {% else %}Nothing here has called a model yet.{% endif %} Dedup hits and library answers are instant and would drag
+      this to nothing.</div>
+  </div>
+  <div class="tile">
+    <div class="k">Cache hit rate</div>
+    <div class="n">{{ efficiency.cache_hit_rate|pct }}</div>
+    <div class="note">Input tokens served from the provider's cache at a tenth
+      of the price.</div>
+  </div>
+</div>
+
 {% if feedback %}
 <div class="card" style="margin-top:16px">
   <h3>What developers said <span class="hint">the only ground truth there is</span></h3>

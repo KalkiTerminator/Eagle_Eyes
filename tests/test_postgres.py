@@ -227,6 +227,76 @@ def _pg_schema_before_the_taxonomy() -> str:
     return sql[:start] + sql[end:]
 
 
+def test_schema_7_and_8_reach_an_existing_database_too() -> None:
+    """Two more columns added and one dropped, on a database that already exists.
+
+    The same trap as the taxonomy: this file is re-applied on every boot and
+    CREATE TABLE IF NOT EXISTS does nothing to a table that is already there.
+    The drop matters as much as the adds -- `failure.severity` shadowed
+    `analysis.severity` through `f.*`, so leaving it on the deployed instance
+    would keep the severity badge invisible there while it worked everywhere
+    else.
+    """
+    if not DSN:
+        check("live schema 7/8 upgrade check skipped -- set EAGLE_EYES_TEST_DSN", True)
+        return
+
+    import psycopg
+    from eagle_eyes.storage_pg import PostgresDatabase
+
+    sql = PG_SCHEMA.read_text()
+    old = sql.split("-- ---------- column upgrades ----------")[0]
+    old = old.replace("    fix_status           TEXT NOT NULL DEFAULT 'pending'\n"
+                      "        CHECK (fix_status IN ('pending','reviewed','fixed')),\n", "")
+    old = old.replace("    category          TEXT CHECK (category IS NULL OR category IN\n"
+                      "                          ('noise','known_pattern','novel')),\n", "")
+    old = old.replace(
+        "    correlation_id       TEXT NOT NULL,",
+        "    severity             TEXT CHECK (severity IN "
+        "('low','medium','high','critical')),\n    correlation_id       TEXT NOT NULL,")
+    check("the derived older schema has the dead column and neither new one",
+          "fix_status" not in old and "category" not in old and "severity" in old)
+
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("DROP SCHEMA public CASCADE")
+        c.execute("CREATE SCHEMA public")
+        c.execute(old)
+        c.execute("INSERT INTO fingerprint(hash, version, exception_type,"
+                  " normalized_message, code_location, expires_at)"
+                  " VALUES (%s,1,'E','m','l.cs:1','2030-01-01')", ("e" * 64,))
+        c.execute("INSERT INTO bot(service_line, bot_number) VALUES ('SL','B1')")
+        c.execute("INSERT INTO analysis(fingerprint_id, path, root_cause, confidence,"
+                  " expires_at) VALUES (1,'text','old cause',0.7,'2030-01-01')")
+        c.execute("INSERT INTO failure(bot_id, fingerprint_id, analysis_id, occurred_at,"
+                  " log_path, correlation_id, content_expires_at, expires_at)"
+                  " VALUES (1,1,1,'2026-01-01','/l.txt','c','2030-01-01','2030-01-01')")
+
+    db = PostgresDatabase(DSN, max_size=2)
+    try:
+        failure_cols = {r["column_name"] for r in db.conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name='failure'")}
+        analysis_cols = {r["column_name"] for r in db.conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name='analysis'")}
+        check("the boot adds failure.fix_status", "fix_status" in failure_cols)
+        check("the boot adds analysis.category", "category" in analysis_cols)
+        check("and drops the shadowing failure.severity",
+              "severity" not in failure_cols, str(sorted(failure_cols)))
+        check("while analysis.severity stays", "severity" in analysis_cols)
+
+        row = db.conn.execute("SELECT a.root_cause, f.fix_status FROM failure f"
+                              " JOIN analysis a ON a.id=f.analysis_id").fetchone()
+        check("the row already there survives",
+              row["root_cause"] == "old cause" and row["fix_status"] == "pending",
+              str(dict(row)))
+
+        db.migrate()
+        check("re-applying the upgrade is harmless", True)
+    finally:
+        db.pool.close()
+
+
 def test_a_database_made_before_the_taxonomy_is_upgraded_in_place() -> None:
     """The deployment path, which no amount of fresh-database testing covers.
 

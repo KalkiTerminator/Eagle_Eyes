@@ -44,6 +44,11 @@ class Job:
     status: str = QUEUED
     result: Any = None
     error: str = ""
+    # What this job is doing RIGHT NOW, for the waiting page. Real progress,
+    # not a scripted sequence of reassuring stage names -- a spinner that
+    # claims "Triaging with Haiku..." while the queue has not started yet is
+    # telling the user something that is not true.
+    note: str = ""
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
@@ -54,7 +59,7 @@ class Job:
 
     def as_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "status": self.status,
-                "error": self.error, "result": self.result}
+                "error": self.error, "result": self.result, "note": self.note}
 
 
 class JobQueue:
@@ -73,7 +78,13 @@ class JobQueue:
 
     # -- submission ----------------------------------------------------
 
-    def submit(self, kind: str, actor: str, fn: Callable[[], Any]) -> Job:
+    def submit(self, kind: str, actor: str, fn: Callable[["Job"], Any]) -> Job:
+        """`fn` is handed the Job so it can report progress as it goes.
+
+        It takes the job rather than closing over it because the job does not
+        exist until this method creates it -- and a status page that cannot say
+        which of forty failures it is on is a spinner, not progress.
+        """
         job = Job(id=uuid.uuid4().hex, kind=kind, actor=actor)
         with self._lock:
             self._jobs[job.id] = job
@@ -111,7 +122,7 @@ class JobQueue:
             job, fn = item
             job.status = RUNNING
             try:
-                job.result = fn()
+                job.result = fn(job)
                 job.status = DONE
             except Exception as exc:
                 # The message reaches a user, so it carries the exception text

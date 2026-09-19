@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def now() -> str:
@@ -528,9 +528,88 @@ CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
     WHERE log_sanitized IS NOT NULL;
 """
 
+MIGRATION_8 = """
+-- Drop `failure.severity`. It was declared in the very first schema and NEVER
+-- WRITTEN by any code path -- and because FailureRepo.SELECT_ begins with
+-- `f.*`, it shadowed the live `analysis.severity` in every joined row. A
+-- sqlite3.Row name lookup returns the first column of that name, so
+-- `row["severity"]` was the dead one: always NULL. The severity badge on the
+-- failure page and in the diagnosis email could never appear, and nothing
+-- failed to say so.
+--
+-- Dropping it is the fix. Aliasing the live column would have worked and left
+-- the trap sitting there for whoever added the next join.
+
+CREATE TABLE failure_new (
+    id                   INTEGER PRIMARY KEY,
+    bot_id               INTEGER NOT NULL REFERENCES bot(id),
+    fingerprint_id       INTEGER NOT NULL REFERENCES fingerprint(id),
+    analysis_id          INTEGER REFERENCES analysis(id),
+    occurred_at          TEXT NOT NULL,
+    ingested_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    status               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','deduped','analyzing','analyzed','failed','suppressed')),
+    was_deduped          INTEGER NOT NULL DEFAULT 0 CHECK (was_deduped IN (0,1)),
+
+    -- provenance: exactly where each input came from
+    log_path             TEXT NOT NULL,     -- UNC path on the VM share
+    screenshot_path      TEXT,              -- UNC path; NOT copied in Mode 0
+    code_path            TEXT,
+    code_mtime           TEXT,
+    code_possibly_stale  INTEGER NOT NULL DEFAULT 0 CHECK (code_possibly_stale IN (0,1)),
+    -- 'log_path' is the normal case: the log names the screenshot file (ARCHITECTURE 4.4).
+    -- 'timestamp' is the fallback when no capture line exists; 'none' means we refused to guess.
+    -- 'uploaded' means a person submitted the image alongside the log through the
+    -- web UI. There is no sibling directory and no capture line to check it
+    -- against, so it is whatever they attached -- recorded as its own method
+    -- rather than borrowed from 'log_path', which would claim the log named it.
+    pairing_method       TEXT CHECK (pairing_method IN
+                             ('log_path','timestamp','none','uploaded')),
+
+    log_sanitized        TEXT,              -- nulled at 90 days
+    code_snapshot        TEXT,              -- nulled at 90 days
+    -- Remediation state, which is a different question from `status` above --
+    -- that one tracks the PIPELINE (did we analyse this yet), this one tracks
+    -- the DEVELOPER (have they done anything about it). The POC kit kept this
+    -- in localStorage: per-browser, invisible to a manager, and outside every
+    -- access rule. Here it is a column, so it is scoped by `bot` like
+    -- everything else and a manager can see it.
+    --
+    -- Counted per distinct FINGERPRINT rather than per row: a 203-failure
+    -- spike is one problem, and "203 pending" is a number nobody can act on.
+    fix_status           TEXT NOT NULL DEFAULT 'pending'
+        CHECK (fix_status IN ('pending','reviewed','fixed')),
+    correlation_id       TEXT NOT NULL,
+    content_expires_at   TEXT NOT NULL,
+    expires_at           TEXT NOT NULL
+);
+
+INSERT INTO failure_new (
+    id, bot_id, fingerprint_id, analysis_id, occurred_at, ingested_at,
+    status, was_deduped, log_path, screenshot_path, code_path, code_mtime,
+    code_possibly_stale, pairing_method, log_sanitized, code_snapshot,
+    fix_status, correlation_id, content_expires_at, expires_at)
+SELECT
+    id, bot_id, fingerprint_id, analysis_id, occurred_at, ingested_at,
+    status, was_deduped, log_path, screenshot_path, code_path, code_mtime,
+    code_possibly_stale, pairing_method, log_sanitized, code_snapshot,
+    fix_status, correlation_id, content_expires_at, expires_at FROM failure;
+
+DROP TABLE failure;
+ALTER TABLE failure_new RENAME TO failure;
+
+CREATE UNIQUE INDEX idx_failure_idempotency ON failure (log_path);
+CREATE INDEX idx_failure_bot_time     ON failure (bot_id, occurred_at DESC);
+CREATE INDEX idx_failure_fingerprint  ON failure (fingerprint_id, occurred_at DESC);
+CREATE INDEX idx_failure_pending      ON failure (status) WHERE status IN ('pending','analyzing');
+CREATE INDEX idx_failure_feed         ON failure (occurred_at DESC);
+CREATE INDEX idx_failure_content_expiry ON failure (content_expires_at)
+    WHERE log_sanitized IS NOT NULL;
+"""
+
 MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4,
                               5: MIGRATION_5, 6: MIGRATION_6,
-                              7: MIGRATION_7}
+                              7: MIGRATION_7, 8: MIGRATION_8}
 
 
 # How long a writer waits for another writer before giving up. SQLite allows
@@ -1172,7 +1251,9 @@ class FailureRepo(Repository):
             f" LEFT JOIN analysis a ON a.id=f.analysis_id"
             f" WHERE TRUE{where} GROUP BY COALESCE(a.category, 'unclassified')"
             f" ORDER BY n DESC", args).fetchall()
-        return [(r["c"], r["n"]) for r in rows]
+        # Underscores are a column value, not a label. `known_pattern` in a
+        # legend reads as a leaked identifier.
+        return [(r["c"].replace("_", " "), r["n"]) for r in rows]
 
     def severity_breakdown(self) -> list[tuple[str, int]]:
         """Worst first, and only rows a model actually classified.

@@ -319,6 +319,7 @@ def create_app(db_path: Path | None = None,
             "environment": state.environment,
             "kill_switch": spend.kill_switch_on(state.env),
             "warning": state.warning,
+            "header_spend": _header_spend(state, account),
             **ctx,
         })
 
@@ -504,8 +505,8 @@ def create_app(db_path: Path | None = None,
             raise HTTPException(status_code=404, detail="that review has expired")
         job = state.jobs.submit(
             "scan", account.email,
-            lambda: _analyse_candidates(state, account, chosen, claimed.root,
-                                        model_choice=choice))
+            lambda job: _analyse_candidates(state, account, chosen, claimed.root,
+                                            model_choice=choice, job=job))
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
     # ------------------------------------------------------------ analytics
@@ -528,6 +529,14 @@ def create_app(db_path: Path | None = None,
         return page(
             request, "analytics.html", tab="analytics", stats=stats, top=top,
             saved=_saving(stats),
+            routing=failures.routing_savings(),
+            routing_svg=charts.stacked(failures.routing_breakdown()),
+            severity=failures.severity_breakdown(),
+            severity_svg=charts.bars(failures.severity_breakdown()),
+            types_svg=charts.bars(failures.failure_type_breakdown()),
+            efficiency=failures.efficiency(),
+            notifications=failures.notifications(),
+            fixes=failures.fix_status_counts(),
             trend_days=30,
             trend_svg=charts.trend(failures.daily_counts(30)),
             top_svg=charts.bars([(t["exception_type"].rsplit(".", 1)[-1], t["n"])
@@ -551,6 +560,19 @@ def create_app(db_path: Path | None = None,
         return page(
             request, "team.html", tab="team", stats=stats, lines=lines,
             saved=_saving(stats), bots=failures.by_bot(14),
+            routing=failures.routing_savings(),
+            routing_svg=charts.stacked(failures.routing_breakdown()),
+            budget_svg=charts.meter(
+                spend.DatabaseLedger(state.db).spent_since(24),
+                spend.guard_for(state.db, state.env).daily_usd,
+                "Deployment spend, last 24 hours"),
+            lifetime_svg=charts.meter(
+                spend.DatabaseLedger(state.db).spent_total(),
+                spend.guard_for(state.db, state.env).total_usd or 0,
+                "Deployment spend, lifetime"),
+            developers=failures.by_developer(12),
+            fixes=failures.fix_status_counts(),
+            feed=failures.activity(20),
             lines_svg=charts.bars([(d["service_line"], d["n"]) for d in lines]),
             spend_svg=charts.bars(
                 [(d["service_line"], float(d["cost"] or 0)) for d in lines],
@@ -626,6 +648,9 @@ def create_app(db_path: Path | None = None,
         headline, tone, show_why = MAIL_OUTCOMES.get(outcome, ("", "", False))
         return page(request, "failure.html", row=row,
                     report=render(_report_input(row, state.db)),
+                    triage=_triage_banner(row),
+                    stored=_stored_analysis(row, state.db),
+                    fix_statuses=FailureRepo.FIX_STATUSES,
                     mail_live=mail.configured(state.env),
                     mail_outcome=outcome if headline else "",
                     mail_headline=headline, mail_tone=tone,
@@ -648,6 +673,26 @@ def create_app(db_path: Path | None = None,
                                                    display_name=account.display_name)
         FeedbackRepo(state.db, p).add(row["analysis_id"], failure_id, dev_id,
                                       verdict, comment[:1000])
+        return RedirectResponse(f"/failures/{failure_id}", status_code=303)
+
+    @app.post("/failures/{failure_id}/fix-status")
+    def set_fix_status(request: Request, failure_id: int,
+                       fix_status: str = Form(...),
+                       account: Account = Depends(require_approved),
+                       state: AppState = Depends(get_state)):
+        """Mark the PROBLEM reviewed or fixed, not this one occurrence.
+
+        `set_fix_status` moves every in-scope failure sharing the fingerprint,
+        raises AccessDenied for a failure the caller cannot see, and refuses a
+        value outside the closed list.
+        """
+        p = account.principal()
+        try:
+            FailureRepo(state.db, p).set_fix_status(failure_id, fix_status)
+        except AccessDenied:
+            raise HTTPException(status_code=404, detail="no such failure")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="unknown fix status")
         return RedirectResponse(f"/failures/{failure_id}", status_code=303)
 
     @app.post("/failures/{failure_id}/email")
@@ -863,6 +908,82 @@ def _model_options(state: AppState) -> list[dict]:
     return out
 
 
+# The routing decision, made visible. This is the product's whole argument:
+# most failures did not need a model, and the page should say which kind this
+# was before it says anything else. Every entry carries a WORD and a shape as
+# well as a colour -- the status triad is a traffic light and its amber and red
+# are not separable under deuteranopia.
+TRIAGE_BANNERS = {
+    "noise": ("good", "good", "No action needed",
+              "Triage classified this as noise. No diagnosis was requested and "
+              "no expensive model was called."),
+    "known_pattern": ("warn", "warning", "Known pattern",
+                      "Answered from the known-pattern library at no cost. This "
+                      "is the standard fix for failures of this kind, not a "
+                      "diagnosis of this one -- which is why its confidence is "
+                      "lower than a real analysis."),
+    "novel": ("bad", "serious", "Novel failure",
+              "Nothing recognised this, so it went to a model for a real "
+              "diagnosis. These are the failures the budget exists for."),
+}
+
+
+def _triage_banner(row) -> dict | None:
+    """What the router decided, in one line, at the top of the page."""
+    category = row["category"] if "category" in row.keys() else None
+    if not category:
+        if row["analysis_id"] is None:
+            return {"tone": "warn", "role": "warning", "what": "Not analysed yet",
+                    "why": "This failure was ingested but never sent for "
+                           "diagnosis. Nothing was charged for it."}
+        return None                      # stored before the routing class existed
+    entry = TRIAGE_BANNERS.get(category)
+    if entry is None:
+        return None
+    tone, role, what, why = entry
+    return {"tone": tone, "role": role, "what": what, "why": why}
+
+
+def _stored_analysis(row, db) -> str:
+    """The stored analysis as JSON, for the collapsible panel.
+
+    Called "the stored analysis" and not "the raw model response", because that
+    is what it is -- the parsed fields we kept. We do not store the raw reply,
+    and labelling this as one would be a small lie on the one page whose job is
+    to be checkable.
+    """
+    import json
+    keep = ("path", "category", "failure_type", "severity", "affected_function",
+            "confidence", "model_id", "root_cause", "suggested_fix",
+            "recommendations", "cost_usd", "latency_ms")
+    keys = set(row.keys())
+    out = {k: row[k] for k in keep if k in keys and row[k] not in (None, "")}
+    if "inputs_used" in keys:
+        out["inputs_used"] = list(db.decode_list(row["inputs_used"])) if db else []
+    return json.dumps(out, indent=2, default=str)
+
+
+def _header_spend(state: AppState, account) -> dict | None:
+    """What the signed-in person's own visible work has cost, for the header.
+
+    SCOPED, and labelled as such. The deployment's real bill is unscoped -- it
+    has to be, a budget is about the account not about who is looking -- and it
+    lives on Team and Admin where the role justifies seeing it. Putting that
+    figure in every user's header would show a plain user what the whole estate
+    spends, which is the thing `_scope_sql` exists to prevent.
+
+    Returns None for anyone not signed in and approved, so the landing and
+    login pages do not run a query to render a number nobody can read.
+    """
+    if account is None or not account.is_approved:
+        return None
+    try:
+        stats = FailureRepo(state.db, account.principal()).stats()
+    except AccessDenied:
+        return None
+    return {"usd": stats["spend_usd"], "failures": stats["failures"]}
+
+
 def _saving(stats: dict) -> float:
     """What deduplication avoided, at the average cost of the calls made.
 
@@ -890,7 +1011,7 @@ def _analyse_error(request: Request, page, state: AppState,
 
 def _analyse_candidates(state: AppState, account: Account,
                         candidates: list, root: Path,
-                        model_choice: str = "smart") -> dict:
+                        model_choice: str = "smart", job=None) -> dict:
     """Analyse chosen candidates, then delete the uploaded tree.
 
     The tree is removed in a finally: it holds whatever the user dropped, and
@@ -909,7 +1030,14 @@ def _analyse_candidates(state: AppState, account: Account,
     first_id = None
 
     try:
-        for c in candidates:
+        total = len(candidates)
+        for index, c in enumerate(candidates, start=1):
+            if job is not None:
+                # Real progress. The POC kit scripted a spinner that said
+                # "Triaging with Haiku..." on a timer, which is a sentence the
+                # page cannot know is true -- this one names the bot it is on.
+                job.note = (f"Analysing {index} of {total} — "
+                            f"{c.location.service_line}/{c.location.bot_number}")
             log_text = read_text(c.log_path)
             code_text = read_text(c.code_path) if c.code_path else ""
             bot_id = bots.upsert(c.location.service_line, c.location.bot_number,

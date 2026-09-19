@@ -10,6 +10,7 @@
     already being charged for.
   </p>
   <p><b id="status">{{ job.status }}</b></p>
+  <p class="small muted" id="note">{{ job.note }}</p>
 </div>
 <script>
 const id = {{ job.id|tojson }};
@@ -18,6 +19,9 @@ async function poll() {
   if (!r.ok) return;
   const j = await r.json();
   document.getElementById('status').textContent = j.status;
+  // The worker's own report of where it is, not a scripted sequence of stage
+  // names on a timer -- the page only claims what the job actually said.
+  document.getElementById('note').textContent = j.note || '';
   if (j.status === 'done' && j.result) {
     location.href = `/failures/${j.result.failure_id}`;
   } else if (j.status === 'failed') {

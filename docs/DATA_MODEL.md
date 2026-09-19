@@ -460,7 +460,6 @@ CREATE TABLE failure (
 
     log_sanitized        TEXT,              -- nulled at 90 days
     code_snapshot        TEXT,              -- nulled at 90 days
-    severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
     -- Remediation state, which is a different question from `status` above --
     -- that one tracks the PIPELINE (did we analyse this yet), this one tracks
     -- the DEVELOPER (have they done anything about it). The POC kit kept this

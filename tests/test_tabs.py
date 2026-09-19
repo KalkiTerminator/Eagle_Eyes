@@ -401,6 +401,61 @@ def test_feedback_tally_is_scoped_too() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_joined_row_never_has_two_columns_of_one_name() -> None:
+    """`FailureRepo.SELECT_` starts with `f.*`, so any failure column sharing a
+    name with a joined one SHADOWS it.
+
+    `failure.severity` did. It was declared in the first schema, never written
+    by any code path, and a sqlite3.Row name lookup returns the first match --
+    so `row["severity"]` was always the dead NULL one, and the severity badge
+    on the failure page and in the diagnosis email could never appear. Nothing
+    failed; the value was simply always empty.
+
+    This asserts the shape rather than that one column, because the next join
+    to `f.*` can reintroduce it just as quietly.
+    """
+    db, d = _world()
+    try:
+        repo = FailureRepo(db, Principal("root@x.com", ADMIN))
+        rows = repo.recent(limit=1)
+        check("there is a row to inspect", bool(rows))
+        names = list(rows[0].keys())
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        check("no column name appears twice in the joined projection",
+              not dupes, str(dupes))
+
+        # And the value that was hidden is now readable end to end.
+        with_sev = [r for r in repo.recent(limit=50) if r["severity"]]
+        if with_sev:
+            check("a classified analysis reports its severity through the join",
+                  with_sev[0]["severity"] in ("low", "medium", "high", "critical"),
+                  str(with_sev[0]["severity"]))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_meter_says_in_words_what_its_colour_says() -> None:
+    """A budget bar whose only signal is hue tells a deuteranope nothing.
+
+    Amber against red is dE 4.3 for one, which no hex tuning fixes -- so the
+    meter writes the state out, and the numbers sit above the track whatever
+    the colour does.
+    """
+    for value, role, word in [(0.1, "good", "within budget"),
+                              (1.4, "warning", "over half spent"),
+                              (1.95, "serious", "close to the cap"),
+                              (3.0, "critical", "over the cap")]:
+        html = charts.meter(value, 2.0, "Spend")
+        check(f"the meter at ${value} is {role}", f"--status-{role}" in html, html[:140])
+        check(f"  and says '{word}'", word in html)
+        check("  with the figures written out", "of $2.0000" in html, html[:200])
+
+    check("no cap configured is stated, not divided by zero",
+          "nothing to measure against" in charts.meter(1.0, 0, "Spend"))
+    check("over the cap does not overflow the track",
+          'width:100.0%' in charts.meter(9.0, 2.0, "Spend"))
+
+
 def test_charts_render_without_a_library_and_degrade_to_a_message() -> None:
     svg = charts.trend([("2026-09-11", 10, 2), ("2026-09-12", 30, 25)])
     check("the trend is inline SVG", "<svg" in svg and "</svg>" in svg)

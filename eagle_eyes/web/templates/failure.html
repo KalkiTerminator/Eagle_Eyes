@@ -5,6 +5,30 @@
 <h1>{{ row['service_line'] }}/{{ row['bot_number'] }}</h1>
 <p class="muted small mono">{{ row['occurred_at'] }} &middot; failure #{{ row['id'] }}</p>
 
+{% if triage %}
+<div class="banner {{ triage.tone }}">
+  <span class="dot" style="background: var(--status-{{ triage.role }})"></span>
+  <span>
+    <span class="what">{{ triage.what }}</span>
+    <span class="why">{{ triage.why }}</span>
+  </span>
+</div>
+{% endif %}
+
+<p class="meta">
+  {% if row['confidence'] is not none %}<span>Confidence <b>{{ '%.2f'|format(row['confidence']) }}</b></span>{% endif %}
+  {% if row['severity'] %}
+    <span class="sev {{ {'critical':'critical','high':'serious','medium':'warning','low':'good'}[row['severity']] }}">
+      <i></i>{{ row['severity']|upper }}
+    </span>
+  {% endif %}
+  {% if row['failure_type'] %}<span>Type <b>{{ row['failure_type'].replace('_', ' ') }}</b></span>{% endif %}
+  {% if row['affected_function'] %}<span>In <b class="mono">{{ row['affected_function'] }}</b></span>{% endif %}
+  <span>Answered by <b>{{ 'the pattern library' if row['path'] == 'template' else (row['model_id'] or row['path'] or 'nothing') }}</b></span>
+  <span>Cost <b>{{ (row['cost_usd'] or 0)|money }}</b></span>
+  {% if row['latency_ms'] %}<span>Took <b>{{ '%.1f'|format(row['latency_ms'] / 1000) }}s</b></span>{% endif %}
+</p>
+
 <div class="card" style="padding:0; overflow:hidden">
   <iframe title="Diagnosis" style="width:100%; height:720px; border:0"
           sandbox srcdoc="{{ report|e }}"></iframe>
@@ -60,6 +84,38 @@
     <textarea id="comment" name="comment"></textarea>
     <p style="margin:18px 0 0"><button type="submit">Submit feedback</button></p>
   </form>
+</div>
+{% endif %}
+
+{% if row['analysis_id'] %}
+<div class="card">
+  <h3 style="margin-top:0">Has this been dealt with?</h3>
+  <p class="muted small">
+    This marks the <b>problem</b>, not this one occurrence — every failure
+    sharing the same fingerprint moves with it. A two-hundred-failure incident
+    is one problem with one fix, and counting them separately would make the
+    workload figures useless.
+  </p>
+  <form method="post" action="/failures/{{ row['id'] }}/fix-status">
+    <label for="fix_status">Status</label>
+    <select id="fix_status" name="fix_status">
+      {% for s in fix_statuses %}
+        <option value="{{ s }}" {{ 'selected' if row['fix_status'] == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <p style="margin:14px 0 0"><button type="submit">Update</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <details class="raw">
+    <summary>The stored analysis</summary>
+    <p class="tiny muted" style="margin:10px 0 0">
+      What was kept, field by field. Not the raw model reply — that is not
+      stored — so this is the record the rest of the product reads.
+    </p>
+    <pre class="mono">{{ stored }}</pre>
+  </details>
 </div>
 {% endif %}
 

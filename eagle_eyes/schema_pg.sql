@@ -167,7 +167,6 @@ CREATE TABLE IF NOT EXISTS failure (
 
     log_sanitized        TEXT,
     code_snapshot        TEXT,
-    severity             TEXT CHECK (severity IN ('low','medium','high','critical')),
     fix_status           TEXT NOT NULL DEFAULT 'pending'
         CHECK (fix_status IN ('pending','reviewed','fixed')),
     correlation_id       TEXT NOT NULL,
@@ -384,3 +383,11 @@ ALTER TABLE analysis ADD COLUMN IF NOT EXISTS category TEXT
     CHECK (category IS NULL OR category IN ('noise','known_pattern','novel'));
 ALTER TABLE failure ADD COLUMN IF NOT EXISTS fix_status TEXT NOT NULL DEFAULT 'pending'
     CHECK (fix_status IN ('pending','reviewed','fixed'));
+
+-- Schema 8. `failure.severity` was declared in the first commit and never
+-- written by any code path, and because FailureRepo.SELECT_ starts with
+-- `f.*` it SHADOWED the live `analysis.severity` in every joined row --
+-- so the severity badge on the failure page and in the diagnosis email
+-- could never appear. Dropping it is the fix; an alias would have left
+-- the trap in place for the next person.
+ALTER TABLE failure DROP COLUMN IF EXISTS severity;

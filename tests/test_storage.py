@@ -67,10 +67,28 @@ def _cut(sql: str, start: str, end: str) -> str:
     return sql[:i] + sql[j:]
 
 
+def _v7_schema() -> str:
+    """schema.sql as version 7 looked -- with the dead `failure.severity`.
+
+    Put back rather than removed, because this chain walks BACKWARDS: each
+    helper derives from the one above it, and v7 is the current file plus the
+    column migration 8 drops.
+    """
+    sql = SCHEMA_PATH.read_text()
+    # ABOVE the fix_status comment block, not between it and the column:
+    # `_v6_schema` cuts that whole block, and a line placed inside it is cut
+    # with it -- which silently produced a "v6" with no severity at all.
+    anchor = "    -- Remediation state,"
+    dead = ("    severity             TEXT CHECK (severity IN "
+            "('low','medium','high','critical')),\n")
+    assert anchor in sql
+    return sql.replace(anchor, dead + anchor, 1)
+
+
 def _v6_schema() -> str:
     """schema.sql as version 6 looked -- before `analysis.category` and
     `failure.fix_status`."""
-    sql = SCHEMA_PATH.read_text()
+    sql = _v7_schema()
     sql = _cut(sql, "    -- The ROUTING class:",
                "                          ('noise','known_pattern','novel')),\n")
     return _cut(sql, "    -- Remediation state,",

@@ -78,7 +78,18 @@ def palette_css() -> str:
     od = "\n".join(f"  --ord-{i + 1}: {c};" for i, c in enumerate(ORDINAL_DARK))
     status = "\n".join(f"  --status-{k}: {v};" for k, v in STATUS_LIGHT.items())
     status_dark = "\n".join(f"  --status-{k}: {v};" for k, v in STATUS_DARK.items())
-    return f""".viz {{
+    return f""":root {{
+{status}
+}}
+@media (prefers-color-scheme: dark) {{
+  :root:where(:not([data-theme="light"])) {{
+{status_dark}
+  }}
+}}
+:root[data-theme="dark"] {{
+{status_dark}
+}}
+.viz {{
   color-scheme: light;
   --viz-surface: #ffffff;
   --viz-grid: #e6e9ed;
@@ -231,6 +242,42 @@ def bars(rows, *, ordinal: bool = False, fmt=None) -> str:
             f'</div>')
     out.append("</div>")
     return "".join(out)
+
+
+def meter(value: float, cap: float, label: str, *, fmt=None) -> str:
+    """A single ratio against a limit: spend against a budget cap.
+
+    A meter rather than a chart, because that is what one number against one
+    limit is. `bars()` normalises against the largest row, so the same figure
+    would fill the track whether the cap were $2 or $200 -- a bar chart of one
+    value against nothing is not a budget.
+
+    The fill steps through the STATUS roles by proportion of the cap, and the
+    numbers are written beside it: colour is never the only thing saying you
+    are near the limit, here or anywhere else in this product.
+    """
+    fmt = fmt or money
+    cap = float(cap or 0)
+    value = max(float(value or 0), 0.0)
+    if cap <= 0:
+        return empty("No cap is configured, so there is nothing to measure against.")
+    pct = min(value / cap, 1.0)
+    over = value > cap
+    role = ("critical" if over else "serious" if pct >= 0.9
+            else "warning" if pct >= 0.6 else "good")
+    # The word, always. `charts.STATUS_*` is a traffic-light triad and a
+    # deuteranope cannot separate its amber from its red; the label is what
+    # makes it legible, not the hue.
+    word = {"good": "within budget", "warning": "over half spent",
+            "serious": "close to the cap", "critical": "over the cap"}[role]
+    return (
+        f'<div class="viz meter">'
+        f'<div class="meter-head"><span>{_e(label)}</span>'
+        f'<b>{_e(fmt(value))} of {_e(fmt(cap))}</b></div>'
+        f'<div class="bar-track"><span class="bar-fill" style="width:{pct * 100:.1f}%;'
+        f'background:var(--status-{role})"></span></div>'
+        f'<div class="meter-foot">{pct * 100:.0f}% &middot; {_e(word)}</div>'
+        f'</div>')
 
 
 def stacked(rows: list[tuple[str, int]]) -> str:

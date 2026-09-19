@@ -155,5 +155,51 @@ def test_no_template_uses_a_class_the_stylesheet_does_not_define() -> None:
         check(f"{path.name}: every class it uses is styled", not missing,
               ", ".join(missing))
 
+def test_a_status_colour_never_appears_without_a_word() -> None:
+    """The status triad is a traffic light, and that is its known weakness.
+
+    Amber against red is dE 4.3 for a deuteranope -- a gap no amount of hex
+    tuning closes, because the best separation available turns "red" into
+    magenta and loses the convention that made the palette worth adopting. The
+    relief the colour-blindness check asks for IS the rule here: every status
+    colour ships beside a word. This is the only thing that makes the palette
+    legitimate, so it is asserted rather than remembered.
+    """
+    templates = ROOT / "eagle_eyes" / "web" / "templates"
+    stylesheet = (templates / "base.html").read_text()
+
+    # Every `.sev` variant carries its text from the template that uses it, and
+    # the class itself only paints a dot -- never a background behind bare
+    # numbers. If a rule ever gives `.sev` a background, this fails.
+    for role in ("critical", "serious", "warning", "good"):
+        rule = f".sev.{role} i {{ background: var(--status-{role}); }}"
+        check(f".sev.{role} colours only its dot", rule in stylesheet, rule)
+
+    offenders = []
+    for path in sorted(templates.glob("*.html")):
+        if path.name == "base.html":
+            continue                      # the stylesheet itself, checked above
+        text = path.read_text()
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if "var(--status-" not in line:
+                continue
+            # The surrounding element must carry text, an aria-label, or a
+            # title -- something a screen reader or a monochrome print shows.
+            window = "\n".join(text.splitlines()[max(0, line_no - 4):line_no + 4])
+            worded = any(k in window for k in
+                         ("class=\"sev", "class=\"what", "aria-label", "title=",
+                          "meter-head", "meter-foot"))
+            if not worded:
+                offenders.append(f"{path.name}:{line_no}")
+    check("no template paints a status colour with nothing to read beside it",
+          not offenders, ", ".join(offenders))
+
+    # The chart helper's own wording is asserted in tests/test_tabs.py, which
+    # imports the package. This file reads source as TEXT on purpose -- it is
+    # the boundary test, and it checks that only the gateway imports a provider
+    # SDK by grepping rather than importing. Importing here would break the
+    # discipline the file exists to enforce.
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))
