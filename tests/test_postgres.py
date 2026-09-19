@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -396,6 +397,72 @@ def test_the_pattern_library_round_trips_through_jsonb() -> None:
               got.name if got else "no match")
     finally:
         db.pool.close()
+
+
+def test_both_dialects_resolve_a_duplicate_column_name_the_same_way() -> None:
+    """The same query must not return different values on the two databases.
+
+    A joined query can carry two columns of one name -- `SELECT f.*, a.severity`
+    where `failure` also has a `severity`. sqlite3.Row resolves that by
+    returning the FIRST. The PostgreSQL shim built its row with a dict
+    comprehension, and a dict cannot hold a duplicate key, so it kept the LAST:
+    the exact opposite.
+
+    That is how one dead column made the severity badge work on the deployed
+    instance and vanish locally. Nothing caught it because each dialect only
+    ever runs against itself -- which is what this test is for.
+    """
+    if not DSN:
+        check("live duplicate-column check skipped -- set EAGLE_EYES_TEST_DSN", True)
+        return
+
+    import psycopg
+    from eagle_eyes.storage_pg import PostgresDatabase
+
+    lite = sqlite3.connect(":memory:")
+    lite.row_factory = sqlite3.Row
+    lite.execute("CREATE TABLE p (id INTEGER, v TEXT)")
+    lite.execute("CREATE TABLE q (id INTEGER, v TEXT)")
+    lite.execute("INSERT INTO p VALUES (1,'from-p')")
+    lite.execute("INSERT INTO q VALUES (1,'from-q')")
+    lite_row = lite.execute(
+        "SELECT p.*, q.v FROM p JOIN q ON q.id=p.id").fetchone()
+
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute("DROP SCHEMA public CASCADE")
+        c.execute("CREATE SCHEMA public")
+        c.execute("CREATE TABLE p (id INT, v TEXT)")
+        c.execute("CREATE TABLE q (id INT, v TEXT)")
+        c.execute("INSERT INTO p VALUES (1,'from-p')")
+        c.execute("INSERT INTO q VALUES (1,'from-q')")
+
+    # Through the REAL path -- Connection.execute -> Cursor.fetchone -- not by
+    # calling the Row constructor directly. A test that builds the row itself
+    # cannot catch a regression in how the cursor builds one, which is the only
+    # place it is ever built in production.
+    db = PostgresDatabase(DSN, max_size=2)
+    try:
+        pg_row = db.conn.execute(
+            "SELECT p.*, q.v FROM p JOIN q ON q.id=p.id").fetchone()
+    finally:
+        db.pool.close()
+
+    check("the query really does return a duplicate name",
+          pg_row.keys().count("v") == 2, str(pg_row.keys()))
+    check("name lookup agrees across dialects",
+          lite_row["v"] == pg_row["v"],
+          f"sqlite {lite_row['v']!r} vs postgres {pg_row['v']!r}")
+    check("  and it is the FIRST column, as sqlite3.Row documents",
+          pg_row["v"] == "from-p", repr(pg_row["v"]))
+    check("positional lookup agrees too",
+          (lite_row[1], lite_row[2]) == (pg_row[1], pg_row[2]),
+          f"sqlite {(lite_row[1], lite_row[2])} vs postgres {(pg_row[1], pg_row[2])}")
+    check("keys() agrees, duplicates included",
+          list(lite_row.keys()) == pg_row.keys(),
+          f"{list(lite_row.keys())} vs {pg_row.keys()}")
+    check("dict(row) keeps the first, and stays usable",
+          dict(pg_row) == {"id": 1, "v": "from-p"}, str(dict(pg_row)))
+    lite.close()
 
 
 def test_against_a_real_server() -> None:

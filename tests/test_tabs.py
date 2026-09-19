@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eagle_eyes.storage import (  # noqa: E402
-    ADMIN, MANAGER, USER, AccessDenied, FailureRepo, FeedbackRepo, Principal,
-    open_database,
+    ADMIN, MANAGER, USER, AccessDenied, AnalysisRepo, FailureRepo, FeedbackRepo,
+    PatternRepo, Principal, open_database,
 )
 from eagle_eyes.web import charts  # noqa: E402
 from eagle_eyes.web.auth import AccountRepo, bootstrap_admin  # noqa: E402
@@ -212,9 +212,13 @@ def _world():
         bot = bots.upsert(line, "BOT001")
         bots.set_owner(bot, owner)
         fp = fps.touch(h * 64, 1, "NullReferenceException", "not set", "Bot.cs:1")
+        # A classified analysis, not a bare one. Several tests read severity,
+        # failure_type and category off the joined row, and a fixture that
+        # leaves them NULL lets those assertions pass by never running.
         analysis = AnalysisRepo(db, p).add(
             fp, path="text", root_cause="rc", suggested_fix="fix",
-            confidence=0.8, cost_usd=0.02)
+            confidence=0.8, cost_usd=0.02, latency_ms=1200,
+            category="novel", failure_type="logic_error", severity="high")
         for i in range(n):
             fails.add(bot_id=bot, fingerprint_id=fp, analysis_id=analysis,
                       occurred_at=f"2026-09-{11 + i:02d}T09:00:00",
@@ -416,16 +420,42 @@ def test_a_joined_row_never_has_two_columns_of_one_name() -> None:
     """
     db, d = _world()
     try:
-        repo = FailureRepo(db, Principal("root@x.com", ADMIN))
-        rows = repo.recent(limit=1)
-        check("there is a row to inspect", bool(rows))
-        names = list(rows[0].keys())
-        dupes = sorted({n for n in names if names.count(n) > 1})
-        check("no column name appears twice in the joined projection",
-              not dupes, str(dupes))
+        p = Principal("root@x.com", ADMIN)
+        failures = FailureRepo(db, p)
+
+        # EVERY projection a repository hands back, not only the one that had
+        # the bug. Each entry is (label, a callable returning rows).
+        first = failures.recent(limit=1)
+        check("there is a row to inspect", bool(first))
+        fid = first[0]["id"] if first else 0
+
+        projections = [
+            ("FailureRepo.recent", lambda: failures.recent(limit=5)),
+            ("FailureRepo.get", lambda: [failures.get(fid)] if fid else []),
+            ("FailureRepo.top_fingerprints", lambda: failures.top_fingerprints(5)),
+            ("FailureRepo.by_bot", lambda: failures.by_bot(5)),
+            ("FailureRepo.by_service_line", lambda: failures.by_service_line()),
+            ("FailureRepo.by_developer", lambda: failures.by_developer(5)),
+            ("FailureRepo.activity", lambda: failures.activity(5)),
+            ("PatternRepo.all", lambda: PatternRepo(db, p).all()),
+            ("AnalysisRepo.get", lambda: [AnalysisRepo(db, p).get(1)]),
+        ]
+        checked = 0
+        for label, fetch in projections:
+            rows = [r for r in fetch() if r is not None]
+            if not rows:
+                continue                    # nothing to inspect, not a pass
+            checked += 1
+            names = list(rows[0].keys())
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            check(f"{label}: no column name appears twice", not dupes, str(dupes))
+        check("and several projections were actually inspected", checked >= 5,
+              f"only {checked}")
 
         # And the value that was hidden is now readable end to end.
-        with_sev = [r for r in repo.recent(limit=50) if r["severity"]]
+        with_sev = [r for r in failures.recent(limit=50) if r["severity"]]
+        check("some analysis in the fixture carries a severity to read",
+              bool(with_sev))
         if with_sev:
             check("a classified analysis reports its severity through the join",
                   with_sev[0]["severity"] in ("low", "medium", "high", "critical"),

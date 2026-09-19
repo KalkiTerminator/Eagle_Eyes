@@ -54,16 +54,58 @@ _OR_REPLACE = re.compile(r"^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+", re.I)
 
 
 class Row(dict):
-    """A dict that also indexes by position, the way sqlite3.Row does."""
+    """A dict that also indexes by position, the way sqlite3.Row does.
 
-    def __init__(self, mapping: dict, order: tuple[str, ...]) -> None:
+    DUPLICATE COLUMN NAMES ARE THE WHOLE REASON THIS IS NOT A PLAIN DICT
+    COMPREHENSION. A joined query can return two columns of one name --
+    `SELECT f.*, a.severity ...` where `failure` also has a `severity` -- and
+    sqlite3.Row resolves that by returning the FIRST of them. A dict cannot
+    hold a duplicate key at all, so building one by comprehension silently kept
+    the LAST, and this shim answered the opposite of the thing it exists to
+    imitate.
+
+    That is worse than it sounds. The same query returned a different value on
+    SQLite than on PostgreSQL, and no test could see it because each dialect
+    only ever runs against itself: the severity badge worked on the deployed
+    instance and was invisible locally, from one `f.*` and one dead column.
+
+    So values are kept POSITIONALLY and each name maps to its first index.
+    Name lookup, positional lookup and `keys()` then all match sqlite3.Row. The
+    dict base is still populated -- first-wins -- because `dict(row)` is used
+    to turn query results into plain dicts in several repositories.
+    """
+
+    def __init__(self, mapping: dict, order: tuple[str, ...],
+                 values: tuple = ()) -> None:
         super().__init__(mapping)
         self._order = order
+        self._values = tuple(values) if values else tuple(
+            mapping.get(n) for n in order)
+        # name -> FIRST index, which is what sqlite3.Row returns for a duplicate
+        self._first: dict[str, int] = {}
+        for i, name in enumerate(order):
+            self._first.setdefault(name, i)
+
+    @classmethod
+    def build(cls, names: tuple[str, ...], record) -> "Row":
+        """The only constructor the cursor should use.
+
+        Builds the dict first-wins rather than last-wins, which a comprehension
+        over `zip(names, record)` cannot do.
+        """
+        values = tuple(normalise(v) for v in record)
+        mapping: dict = {}
+        for name, value in zip(names, values):
+            mapping.setdefault(name, value)
+        return cls(mapping, names, values)
 
     def __getitem__(self, key):
         if isinstance(key, int):
-            return super().__getitem__(self._order[key])
-        return super().__getitem__(key)
+            return self._values[key]
+        index = self._first.get(key)
+        if index is None:
+            raise KeyError(key)
+        return self._values[index]
 
     def keys(self):                      # sqlite3.Row.keys() returns a list
         return list(self._order)
@@ -141,7 +183,7 @@ class Cursor:
             return None
         record = self._rows[self._i]
         self._i += 1
-        return Row({n: normalise(v) for n, v in zip(self._names, record)}, self._names)
+        return Row.build(self._names, record)
 
     def fetchall(self) -> list[Row]:
         out, row = [], self.fetchone()
