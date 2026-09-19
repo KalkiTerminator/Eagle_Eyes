@@ -187,6 +187,48 @@ def _wait(c, job_url: str, timeout: float = 20.0) -> dict:
     return status
 
 
+def _completed(c, job_url: str) -> dict:
+    """Wait for a job AND assert it produced a real diagnosis.
+
+    `_wait` alone is not enough, and that is the shape of a bug this suite
+    already shipped once. `Engine.analyse` never raises: a budget refusal, a
+    provider error or a kill switch all come back as a valid Analysis with
+    `path='fallback'` and `confidence=0.0`, which the web layer stores and
+    returns a `failure_id` for exactly like a real one. So a test that waits for
+    "done" and reads the failure id cannot tell a diagnosis from a refusal.
+
+    `test_seeding_spends_its_budget...` asserted six model calls and was green
+    for months because the deep projection sat above the per-call cap and every
+    deep call was refused before being made. The count was right by coincidence.
+
+    Use this wherever a test means "the analysis worked", so the next one is
+    correct by default rather than by remembering.
+    """
+    status = _wait(c, job_url)
+    assert status["status"] == "done", f"job did not complete: {status}"
+    result = status.get("result") or {}
+    assert result.get("failure_id"), f"no failure was stored: {status}"
+
+    row = c.app.state.ee.db.conn.execute(
+        "SELECT a.path, a.confidence FROM failure f"
+        " JOIN analysis a ON a.id = f.analysis_id WHERE f.id = ?",
+        (result["failure_id"],)).fetchone()
+    assert row is not None, "the failure carries no analysis at all"
+
+    # `path` is the discriminator, NOT confidence. MockBackend answers at
+    # confidence 0.0 and is honest to do so -- it did not analyse anything --
+    # so a confidence assertion would fail on every successful mock run while
+    # a real refusal and a real diagnosis are told apart by the path alone:
+    #
+    #   fallback   the budget guard, the provider, or a parse failure refused
+    #   skipped    triage called it noise, or there was no exception to read
+    #   text/vision/template/dedup   something actually answered
+    assert row["path"] not in ("fallback", "skipped"), (
+        f"the analysis came back as {row['path']}, not a diagnosis -- "
+        "a refusal reaches this point looking exactly like success")
+    return status
+
+
 # ------------------------------------------------------------------ public
 
 def test_public_pages() -> None:
@@ -286,9 +328,12 @@ def test_the_full_journey() -> None:
                                 "image/png"))
         check("the submission is accepted", r.status_code == 303, str(r.status_code))
 
-        status = _wait(c, r.headers["location"])
-        check("the analysis completes on a worker", status["status"] == "done",
-              str(status))
+        # `_completed` rather than `_wait`: a budget refusal also reaches
+        # "done" with a failure_id, and this is the test whose name promises the
+        # whole path works.
+        status = _completed(c, r.headers["location"])
+        check("the analysis completes on a worker with a real diagnosis",
+              status["status"] == "done", str(status))
         failure_id = status["result"]["failure_id"]
 
         r = c.get(f"/failures/{failure_id}")
@@ -621,14 +666,36 @@ def test_spend_is_read_from_the_database_not_a_counter() -> None:
         _approve(c, _account_ids(c)["dev@x.com"], role="user")
         c.post("/logout")
         _login(c, "dev@x.com")
-        _wait(c, _submit_and_run(c).headers["location"])
+        _completed(c, _submit_and_run(c).headers["location"])
         c.post("/logout")
+
+        # A KNOWN cost on a committed row. The mock backend is genuinely free,
+        # so asserting "more than zero" would assert nothing -- and checking
+        # only that the words "Spent, lifetime" appear would pass against a
+        # hard-coded zero, or against a counter, which is the exact thing this
+        # test's name says it is ruling out. Put a figure in the database and
+        # require the page to report that figure.
+        db = c.app.state.ee.db
+        db.conn.execute("UPDATE analysis SET cost_usd = 0.1234"
+                        " WHERE id = (SELECT MAX(id) FROM analysis)")
 
         _login(c, ADMIN_EMAIL, ADMIN_PASSWORD)
         r = c.get("/admin")
         check("the admin page reports lifetime spend", "Spent, lifetime" in r.text)
         check("  and says where the figure comes from",
               "committed analyses" in r.text)
+        check("  and the figure is the one in the database, to the cent",
+              "$0.1234" in r.text,
+              "page does not carry the committed figure")
+
+        # And it is READ, not remembered: change the row, reload, get the new
+        # number. A process-local counter would still say 0.1234.
+        db.conn.execute("UPDATE analysis SET cost_usd = 0.5678"
+                        " WHERE id = (SELECT MAX(id) FROM analysis)")
+        again = c.get("/admin")
+        check("changing the committed row changes the page",
+              "$0.5678" in again.text and "$0.1234" not in again.text,
+              "the figure did not follow the database")
     finally:
         _cleanup(c, d)
 
