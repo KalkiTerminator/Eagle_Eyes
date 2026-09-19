@@ -58,6 +58,23 @@
       <button type="submit">Analyse the ticked rows</button>
       <a class="btn ghost" href="/app" style="margin-left:6px">Start over</a>
     </p>
+
+    <label for="model">Model</label>
+    <select id="model" name="model">
+      {% for m in model_options %}
+        <option value="{{ m.key }}" {{ 'disabled' if not m.ok }}>
+          {{ m.label }}{% if m.cost is not none %} — about {{ '$%.4f'|format(m.cost) }} each{% endif %}{% if not m.ok %} (unavailable: {{ m.why }}){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    <p class="tiny muted" style="margin:8px 0 0">
+      An override replaces the <b>diagnosis</b> model only. Haiku still triages
+      either way, so noise is still dropped for a fraction of a cent and only
+      the failures that survive reach the model you pick. Deduplicated failures
+      and anything the known-pattern library answers never reach one at all.
+      The quoted figure is the projection the budget guard actually checks, not
+      an estimate for display.
+    </p>
     <p class="tiny muted" style="margin:12px 0 0">
       <b>code*</b> means the source file was modified after the failure, so it may
       not be what ran — confidence is capped for those. <b>shot</b> means a

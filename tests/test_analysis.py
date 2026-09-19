@@ -66,7 +66,13 @@ class ExplodingBackend:
         raise RuntimeError("provider unreachable")
 
 
-MODELS = {"triage": "m-triage", "deep": "m-deep"}
+# The real BYOK ids, not invented ones. `project()` refuses a model it cannot
+# price -- an unpriced call records $0.00 and the daily and lifetime caps would
+# never see it -- so a fabricated id now degrades every analysis in this file
+# instead of exercising the routing it is meant to test. ScriptedBackend ignores
+# the string anyway, so using the real ones costs nothing and means these tests
+# run the same pricing path production does.
+MODELS = {"triage": "claude-haiku-4-5", "deep": "claude-sonnet-5"}
 
 
 def triage_json(category="novel", needs=False, conf=0.8) -> str:
@@ -97,8 +103,8 @@ def test_novel_runs_triage_then_deep() -> None:
     b = ScriptedBackend(triage_json(), deep_json())
     a = _engine(b).analyse(log_text=LOG, code_text=CODE, code_path="AP.cs")
     check("two calls: triage then deep", len(b.calls) == 2)
-    check("triage used the cheap model", b.calls[0]["model"] == "m-triage")
-    check("deep used the deep model", b.calls[1]["model"] == "m-deep")
+    check("triage used the cheap model", b.calls[0]["model"] == MODELS["triage"])
+    check("deep used the deep model", b.calls[1]["model"] == MODELS["deep"])
     check("a diagnosis came back", "banner" in a.root_cause and a.confidence > 0.8)
     check("both usages are accounted for", len(a.usages) == 2)
     check("inputs used are recorded", set(a.inputs_used) == {"log", "code"})

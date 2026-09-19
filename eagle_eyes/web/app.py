@@ -33,7 +33,8 @@ from fastapi.templating import Jinja2Templates
 from .. import runtime, storage
 from ..analysis import SCREENSHOT_MODES, Engine
 from ..model_gateway import (
-    BackendError, MODELS, create_backend, current_environment, models_for,
+    MODELS, SELECTABLE, BackendError, create_backend, current_environment,
+    models_for, project,
 )
 from ..notify import compose, compose_html
 from ..report import ReportInput, render
@@ -197,15 +198,38 @@ class AppState:
     def backend_name(self) -> str:
         return (self.env.get(BACKEND_VAR) or "mock").lower()
 
-    def engine(self) -> Engine:
-        """A fresh Engine per analysis, with a guard reading committed spend."""
+    def engine(self, choice: str = "smart") -> Engine:
+        """A fresh Engine per analysis, with a guard reading committed spend.
+
+        `choice` is a key of `model_gateway.SELECTABLE` and it replaces the DEEP
+        model only -- triage still runs on Haiku, so noise is still dropped for
+        a fraction of a cent and only the failures that survive reach the chosen
+        model.
+
+        It must stay callable with no arguments: the seeder is handed this bound
+        method as a factory and calls it with none.
+
+        The BACKEND is never chosen here. It comes from the environment, and the
+        byok governance guard keys on the backend rather than on the model, so
+        swapping a model within an approved backend correctly does not change
+        where prompt content goes. `byok_approved_by` comes from server config
+        and must never be reachable from a request -- a user-supplied approver
+        would satisfy the guard and defeat it entirely.
+        """
         name = self.backend_name()
         backend = create_backend({"backend": name,
                                   "region": self.env.get("AWS_REGION", ""),
                                   "byok_approved_by": self.env.get(
                                       "EAGLE_EYES_BYOK_APPROVED_BY", "")},
                                  self.environment)
-        return Engine(backend, models_for(name),
+        models = dict(models_for(name))
+        role = SELECTABLE.get(choice, SELECTABLE["smart"])[0]
+        if role:
+            # A MERGE, never a replacement: `Engine` reads models["triage"] and
+            # models["deep"] with .get(..., ""), so a partial dict would send an
+            # empty model id to the provider.
+            models["deep"] = models[role]
+        return Engine(backend, models,
                       budget=spend.guard_for(self.db, self.env),
                       screenshot_mode=self.screenshot_mode(),
                       library=PatternRepo(self.db, Principal.local()).library())
@@ -433,11 +457,13 @@ def create_app(db_path: Path | None = None,
                     bots=len({(r["service_line"], r["bot_number"]) for r in rows}),
                     paired=sum(1 for r in rows if r["pairing_method"] != "none"),
                     refused=sum(1 for r in rows if r["pairing_method"] == "none"),
-                    skipped=rebuilt.skipped)
+                    skipped=rebuilt.skipped,
+                    model_options=_model_options(state))
 
     @app.post("/app/analyse")
     def analyse_picked(request: Request, token: str = Form(...),
                        pick: list[int] = Form(default=[]),
+                       model: str = Form(default="smart"),
                        account: Account = Depends(require_approved),
                        state: AppState = Depends(get_state)):
         # PEEK for the guards, TAKE only once committed. Claiming the review
@@ -462,6 +488,11 @@ def create_app(db_path: Path | None = None,
                 f"limit. It exists so one person cannot exhaust the budget for "
                 f"everyone. Your upload is still here.")
 
+        # Validated against the allowlist rather than passed through. A forged
+        # value must never reach a provider as a model id, and an unrecognised
+        # one falls back to smart routing rather than to an empty string.
+        choice = model if model in SELECTABLE else "smart"
+
         chosen = [held.candidates[i] for i in pick if 0 <= i < len(held.candidates)]
         if not chosen:
             return _analyse_error(request, page, state, account,
@@ -473,7 +504,8 @@ def create_app(db_path: Path | None = None,
             raise HTTPException(status_code=404, detail="that review has expired")
         job = state.jobs.submit(
             "scan", account.email,
-            lambda: _analyse_candidates(state, account, chosen, claimed.root))
+            lambda: _analyse_candidates(state, account, chosen, claimed.root,
+                                        model_choice=choice))
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
     # ------------------------------------------------------------ analytics
@@ -800,6 +832,37 @@ def create_app(db_path: Path | None = None,
 # Helpers
 # --------------------------------------------------------------------------
 
+def _model_options(state: AppState) -> list[dict]:
+    """The model dropdown, with what each choice is projected to cost.
+
+    The figure is the projection the budget guard will actually check, not a
+    marketing number -- so if a cap would refuse the choice, the page says so
+    before the click rather than after it. `smart` is quoted as triage plus
+    deep, because that is what it spends.
+    """
+    models = models_for(state.backend_name())
+    cap = spend.guard_for(state.db, state.env).single_call_usd
+    out = []
+    for key, (role, label) in SELECTABLE.items():
+        try:
+            if key == "smart":
+                cost = (project(models["triage"], "triage")
+                        + project(models["deep"], "deep"))
+                worst = project(models["deep"], "deep")
+            else:
+                cost = project(models["triage"], "triage") + project(models[role], "deep")
+                worst = max(project(models["triage"], "triage"),
+                            project(models[role], "deep"))
+        except BackendError as exc:
+            out.append({"key": key, "label": label, "cost": None,
+                        "ok": False, "why": str(exc)})
+            continue
+        out.append({"key": key, "label": label, "cost": cost, "ok": worst <= cap,
+                    "why": (f"the per-call cap is ${cap:.2f} and this projects "
+                            f"at ${worst:.4f}") if worst > cap else ""})
+    return out
+
+
 def _saving(stats: dict) -> float:
     """What deduplication avoided, at the average cost of the calls made.
 
@@ -826,7 +889,8 @@ def _analyse_error(request: Request, page, state: AppState,
 
 
 def _analyse_candidates(state: AppState, account: Account,
-                        candidates: list, root: Path) -> dict:
+                        candidates: list, root: Path,
+                        model_choice: str = "smart") -> dict:
     """Analyse chosen candidates, then delete the uploaded tree.
 
     The tree is removed in a finally: it holds whatever the user dropped, and
@@ -838,7 +902,7 @@ def _analyse_candidates(state: AppState, account: Account,
     from ..discovery import read_text
 
     p = account.principal()
-    engine = state.engine()
+    engine = state.engine(model_choice)
     bots, fps = BotRepo(state.db, p), FingerprintRepo(state.db, p)
     seen: dict[str, int] = {}
     made = deduped = 0
@@ -1000,68 +1064,6 @@ def _report_input(row, db=None) -> ReportInput:
     )
 
 
-def _analyse_upload(state: AppState, p: Principal, upload, account: Account) -> dict:
-    """Run one uploaded failure and store it. Executed on a worker thread."""
-    try:
-        engine = state.engine()
-    except BackendError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    analysis = engine.analyse(
-        log_text=upload.log_text, code_text=upload.code_text,
-        code_path=upload.code_name, code_mtime=upload.code_mtime,
-        code_stale=False, bot_label=upload.label,
-        code_location=upload.code_name,
-        image=upload.image,
-        # An upload has no code mtime, so the reuse gate cannot tell whether
-        # the code changed. Refusing reuse is the honest answer -- see
-        # ingest.py's module docstring.
-        force=not upload.may_reuse)
-
-    bots = BotRepo(state.db, p)
-    bot_id = bots.upsert(upload.service_line, upload.bot_number)
-    bots.set_owner(bot_id, account.email)
-
-    fp_id = FingerprintRepo(state.db, p).touch(
-        analysis.fingerprint or ("0" * 64), 1,
-        upload.exception_type or "Unknown", upload.message or "",
-        upload.code_name or "")
-
-    # Every call in this analysis, not just the last: triage and deep are two
-    # calls and charging for one of them understates the spend the caps read.
-    tokens_in = sum(u.input_tokens for u in analysis.usages)
-    tokens_out = sum(u.output_tokens for u in analysis.usages)
-    cost = sum(u.cost_usd for u in analysis.usages if u.priced)
-    latency = sum(u.latency_ms for u in analysis.usages)
-    model_id = analysis.usages[-1].model if analysis.usages else ""
-
-    analysis_id = AnalysisRepo(state.db, p).add(
-        fp_id, path=analysis.path, root_cause=analysis.root_cause,
-        suggested_fix=analysis.suggested_fix, confidence=analysis.confidence,
-        model_id=model_id, inputs_used=tuple(analysis.inputs_used),
-        tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
-        latency_ms=latency,
-        cache_read_tokens=sum(u.cache_read_tokens for u in analysis.usages),
-        image_tokens=sum(u.image_tokens for u in analysis.usages),
-        category=analysis.category, failure_type=analysis.failure_type,
-        severity=analysis.severity, affected_function=analysis.affected_function,
-        recommendations=analysis.recommendations)
-
-    failure_id = FailureRepo(state.db, p).add(
-        bot_id=bot_id, fingerprint_id=fp_id, analysis_id=analysis_id,
-        occurred_at=upload.occurred_at.replace(tzinfo=None).isoformat(
-            timespec="seconds"),
-        log_path=f"upload://{account.email}/{now()}",
-        screenshot_path="uploaded" if upload.image else None,
-        code_path=upload.code_name or None,
-        pairing_method=upload.pairing_method,
-        log_sanitized=upload.log_text[:20000],
-        correlation_id=secrets.token_hex(8))
-
-    _record_analysis(state.db, p, failure_id)
-    return {"failure_id": failure_id, "confidence": analysis.confidence,
-            "path": analysis.path, "cost_usd": cost,
-            "degradations": upload.degradations}
 
 
 def _record_analysis(db: Database, p: Principal, failure_id: int | None) -> None:

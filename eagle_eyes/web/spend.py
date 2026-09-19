@@ -35,12 +35,19 @@ HOURLY_ANALYSES_VAR = "EAGLE_EYES_HOURLY_ANALYSES"
 DEFAULT_DAILY = 2.00
 DEFAULT_TOTAL = 25.00
 DEFAULT_PER_RUN = 0.50
-# Above analysis.DEEP_PROJECTION_USD, and that is the whole requirement: at
-# 0.05 this sat BELOW the $0.06 a deep call is projected at, so every deep
-# analysis on the hosted instance was refused before it was attempted -- the
-# user saw "single call projected at $0.0600, cap is $0.05" and no diagnosis,
-# with a valid key and an untouched budget. A test now ties the two together.
-DEFAULT_SINGLE_CALL = 0.10
+# Above the projection of the most expensive SELECTABLE model, and that is the
+# whole requirement. At 0.05 this sat below the $0.06 a Sonnet deep call is
+# projected at, so every deep analysis on the hosted instance was refused
+# before it was attempted -- a valid key, an untouched budget, and "single call
+# projected at $0.0600, cap is $0.05" instead of a diagnosis. Opus 5 projects
+# at $0.144, so admitting it needs 0.20.
+#
+# This is the weakest of the three caps by design: it only asks whether one
+# request is unreasonable on its own, and $0.15 for an Opus call is not. The
+# daily ($2) and lifetime ($25) caps are the real protection and are unchanged,
+# so the worst case is still a refusal rather than a bill. A test asserts this
+# admits every model the dropdown offers.
+DEFAULT_SINGLE_CALL = 0.20
 DEFAULT_HOURLY_ANALYSES = 20
 
 

@@ -289,6 +289,33 @@ def test_a_row_survives_the_round_trip_intact() -> None:
 
 # ------------------------------------------------------ caps vs projections
 
+def test_every_selectable_model_is_priced() -> None:
+    """An unpriced model records $0.00 and the caps never see the spend.
+
+    `Usage.priced` is False outside PRICING, `cost_usd` comes back 0.0, the web
+    layer excludes unpriced usages from the stored cost, and `DatabaseLedger`
+    reads exactly those stored rows. A model we cannot price is a model we
+    cannot cap -- so offering one in a dropdown would quietly uncap the budget.
+    """
+    from eagle_eyes.model_gateway import MODELS, PRICING, SELECTABLE, project
+
+    for backend in ("byok", "bedrock"):
+        for key, (role, _label) in SELECTABLE.items():
+            if not role:
+                continue
+            model = MODELS[backend][role]
+            check(f"{backend}/{key} is in PRICING",
+                  model.replace("anthropic.", "") in PRICING, model)
+            check(f"  and can therefore be projected", project(model) > 0)
+
+    refused = False
+    try:
+        project("house-model-v2")
+    except Exception as exc:
+        refused = "no price is known" in str(exc)
+    check("an unpriced model is refused rather than treated as free", refused)
+
+
 def test_the_hosted_caps_permit_the_call_they_govern() -> None:
     """A per-call cap below the per-call projection refuses everything.
 
@@ -300,17 +327,26 @@ def test_the_hosted_caps_permit_the_call_they_govern() -> None:
     test between them.
     """
     from eagle_eyes.analysis import DEEP_PROJECTION_USD, TRIAGE_PROJECTION_USD
-    from eagle_eyes.model_gateway import BudgetGuard
+    from eagle_eyes.model_gateway import (
+        MODELS as REAL_MODELS, SELECTABLE, BudgetGuard, project)
     from eagle_eyes.web import spend
 
-    check("the single-call cap admits a deep call",
-          spend.DEFAULT_SINGLE_CALL >= DEEP_PROJECTION_USD,
-          f"{spend.DEFAULT_SINGLE_CALL} < {DEEP_PROJECTION_USD}")
-    check("  and a triage call", spend.DEFAULT_SINGLE_CALL >= TRIAGE_PROJECTION_USD)
-    check("the per-run cap admits at least one whole analysis",
-          spend.DEFAULT_PER_RUN >= TRIAGE_PROJECTION_USD + DEEP_PROJECTION_USD)
+    # EVERY model the dropdown offers, not just the default one. A cap that
+    # admits Sonnet and refuses Opus makes the Opus option a trap.
+    triage = project(REAL_MODELS["byok"]["triage"], "triage")
+    for key, (role, _label) in SELECTABLE.items():
+        deep = project(REAL_MODELS["byok"][role or "deep"], "deep")
+        check(f"the single-call cap admits {key}",
+              spend.DEFAULT_SINGLE_CALL >= max(deep, triage),
+              f"{spend.DEFAULT_SINGLE_CALL} < {max(deep, triage):.4f}")
+        check(f"  and the per-run cap admits one whole {key} analysis",
+              spend.DEFAULT_PER_RUN >= triage + deep,
+              f"{spend.DEFAULT_PER_RUN} < {triage + deep:.4f}")
     check("and the daily cap admits at least one run",
           spend.DEFAULT_DAILY >= spend.DEFAULT_PER_RUN)
+    check("the named Sonnet constants still describe the default route",
+          abs(DEEP_PROJECTION_USD - project(REAL_MODELS["byok"]["deep"])) < 1e-9
+          and abs(TRIAGE_PROJECTION_USD - triage) < 1e-9)
 
     # Not only arithmetic: run one through the guard the hosted app builds.
     engine = Engine(MockBackend(), MODELS["mock"], library=PatternLibrary.empty(),
@@ -323,6 +359,104 @@ def test_the_hosted_caps_permit_the_call_they_govern() -> None:
                        bot_label="B", code_location="AP.cs:P", image=None)
     check("a novel failure reaches the model under the hosted defaults",
           a.path == Path_.TEXT.value, f"{a.path}: {a.notes}")
+
+
+# ------------------------------------------------------------ model override
+
+def _priced_engine(choice: str, backend, **kw):
+    """An Engine wired the way AppState.engine wires one, for a given choice."""
+    from eagle_eyes.model_gateway import MODELS as REAL_MODELS, SELECTABLE
+    models = dict(REAL_MODELS["byok"])
+    role = SELECTABLE[choice][0]
+    if role:
+        models["deep"] = models[role]
+    return Engine(backend, models, library=PatternLibrary.empty(), **kw)
+
+
+def test_an_override_replaces_the_deep_model_and_nothing_else() -> None:
+    """Triage still runs on Haiku, whatever is picked.
+
+    The POC kit skipped triage on an override, which is simpler to explain and
+    sends every noisy line in a batch to the expensive model. Keeping triage
+    means noise is still dropped for a fraction of a cent, and the routing
+    argument the product makes survives the feature.
+    """
+    from eagle_eyes.model_gateway import BudgetGuard
+
+    for choice, want_deep in [("smart", "claude-sonnet-5"),
+                              ("haiku", "claude-haiku-4-5"),
+                              ("sonnet", "claude-sonnet-5"),
+                              ("opus", "claude-opus-5")]:
+        b = MockBackend(canned={m: json.dumps({"category": "novel",
+                                               "needs_screenshot": False,
+                                               "confidence": 0.9})
+                                for m in ("claude-haiku-4-5",)})
+        engine = _priced_engine(choice, b,
+                                budget=BudgetGuard(daily_usd=99, per_run_usd=99,
+                                                   single_call_usd=99))
+        engine.analyse(log_text=LOG, code_text="x", code_path="AP.cs",
+                       code_mtime=None, code_stale=False, bot_label="B",
+                       code_location="AP.cs:P", image=None)
+        models = [c["model"] for c in b.calls]
+        check(f"{choice}: triage still runs on Haiku",
+              models[0] == "claude-haiku-4-5", str(models))
+        check(f"{choice}: the diagnosis goes to {want_deep}",
+              models[1] == want_deep, str(models))
+
+
+def test_an_override_does_not_analyse_noise() -> None:
+    """A noise log under an Opus override costs one Haiku call, not one Opus call."""
+    from eagle_eyes.model_gateway import BudgetGuard
+
+    b = MockBackend(canned={"claude-haiku-4-5": json.dumps(
+        {"category": "noise", "needs_screenshot": False, "confidence": 0.95})})
+    engine = _priced_engine("opus", b,
+                            budget=BudgetGuard(daily_usd=99, per_run_usd=99,
+                                               single_call_usd=99))
+    a = engine.analyse(log_text=LOG, code_text="x", code_path="AP.cs",
+                       code_mtime=None, code_stale=False, bot_label="B",
+                       code_location="AP.cs:P", image=None)
+    check("noise never reaches the chosen model",
+          [c["model"] for c in b.calls] == ["claude-haiku-4-5"], str(b.calls))
+    check("  and is reported as noise", a.category == "noise")
+
+
+def test_an_override_cannot_outspend_the_caps() -> None:
+    """The expensive option is refused when the budget is gone, not billed.
+
+    Checked BEFORE the call, so the refusal costs nothing -- and it is reported
+    as a failed analysis rather than disguised as a diagnosis.
+    """
+    from eagle_eyes.model_gateway import BudgetGuard, MemoryLedger, Usage
+
+    spent = MemoryLedger()
+    spent.record(1.99)                       # a daily cap of $2.00, nearly gone
+    b = MockBackend(canned={"claude-haiku-4-5": json.dumps(
+        {"category": "novel", "needs_screenshot": False, "confidence": 0.9})})
+    engine = _priced_engine("opus", b,
+                            budget=BudgetGuard(daily_usd=2.00, per_run_usd=2.00,
+                                               single_call_usd=0.20, ledger=spent))
+    a = engine.analyse(log_text=LOG, code_text="x", code_path="AP.cs",
+                       code_mtime=None, code_stale=False, bot_label="B",
+                       code_location="AP.cs:P", image=None)
+    check("the Opus call is never made", "claude-opus-5" not in
+          [c["model"] for c in b.calls], str([c["model"] for c in b.calls]))
+    check("the refusal is reported, not disguised as a diagnosis",
+          a.path == Path_.FALLBACK.value and a.confidence == 0.0, a.path)
+    check("  and it names the budget", "daily budget" in a.notes, a.notes)
+
+    # The same choice succeeds when the budget is there, so the refusal above
+    # is the cap working rather than the override being broken.
+    engine2 = _priced_engine("opus", MockBackend(canned={
+        "claude-haiku-4-5": json.dumps({"category": "novel",
+                                        "needs_screenshot": False,
+                                        "confidence": 0.9})}),
+        budget=BudgetGuard(daily_usd=99, per_run_usd=99, single_call_usd=0.20))
+    a2 = engine2.analyse(log_text=LOG, code_text="x", code_path="AP.cs",
+                         code_mtime=None, code_stale=False, bot_label="B",
+                         code_location="AP.cs:P", image=None)
+    check("with budget, the same override runs", a2.path == Path_.TEXT.value,
+          f"{a2.path}: {a2.notes}")
 
 
 if __name__ == "__main__":

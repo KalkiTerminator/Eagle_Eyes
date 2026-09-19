@@ -68,9 +68,20 @@ def test_seeding_spends_its_budget_on_the_failures_that_repeat() -> None:
               str(summary["failures"]))
         check("into far fewer distinct problems", summary["fingerprints"] < 40,
               str(summary["fingerprints"]))
-        check("exactly the budgeted number of model calls is made",
-              len(backend.calls) == 6, str(len(backend.calls)))
-        check("  and the summary agrees", summary["analysed"] == 6)
+        # Six fingerprints, two calls each -- triage then deep. This read
+        # `== 6` and passed, because the flat $0.06 deep projection sat above
+        # the default $0.05 per-call cap and every deep call was refused before
+        # it was made: the seeded demo was six triage calls and six budget
+        # refusals dressed as diagnoses. The projection is derived per model
+        # now, so the deep call actually happens and the count is what the
+        # routing says it should be.
+        check("two calls per analysed fingerprint: triage, then deep",
+              len(backend.calls) == 12, str(len(backend.calls)))
+        check("  and the summary counts analyses, not calls",
+              summary["analysed"] == 6, str(summary["analysed"]))
+        paths = {r["path"] for r in db.conn.execute("SELECT DISTINCT path FROM analysis")}
+        check("  none of which is a budget refusal",
+              "fallback" not in paths, str(sorted(paths)))
 
         stats = FailureRepo(db, Principal.local()).stats()
         check("most failures are answered without a model call",

@@ -40,9 +40,27 @@ from typing import Any, Protocol
 # --------------------------------------------------------------------------
 
 MODELS = {
-    "bedrock": {"triage": "anthropic.claude-haiku-4-5", "deep": "anthropic.claude-sonnet-5"},
-    "byok":    {"triage": "claude-haiku-4-5",           "deep": "claude-sonnet-5"},
-    "mock":    {"triage": "mock-haiku",                 "deep": "mock-sonnet"},
+    "bedrock": {"triage": "anthropic.claude-haiku-4-5",
+                "deep":   "anthropic.claude-sonnet-5",
+                "opus":   "anthropic.claude-opus-5"},
+    "byok":    {"triage": "claude-haiku-4-5",
+                "deep":   "claude-sonnet-5",
+                "opus":   "claude-opus-5"},
+    "mock":    {"triage": "mock-haiku", "deep": "mock-sonnet", "opus": "mock-opus"},
+}
+
+# What the model dropdown may offer, and which role each one substitutes for
+# `deep`. `smart` is the default and overrides nothing.
+#
+# An override REPLACES THE DEEP MODEL ONLY. Triage still runs on Haiku, so noise
+# is still dropped for a fraction of a cent and only the failures that survive
+# reach the chosen model. The POC kit skipped triage entirely on an override,
+# which is simpler to explain and sends every noisy line in a batch to Opus.
+SELECTABLE: dict[str, tuple[str, str]] = {
+    "smart":  ("", "Smart routing — Haiku triages, Sonnet 5 diagnoses"),
+    "haiku":  ("triage", "Haiku 4.5 only — fastest and cheapest"),
+    "sonnet": ("deep", "Sonnet 5 only — the default diagnosis model"),
+    "opus":   ("opus", "Opus 5 only — for the hardest cases"),
 }
 
 # USD per million tokens. These are Anthropic first-party list rates and apply
@@ -53,7 +71,53 @@ MODELS = {
 PRICING = {
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-sonnet-5":  (2.00, 10.00),
+    "claude-opus-5":    (5.00, 25.00),
 }
+
+# The token profile a call is ASSUMED to have, for the budget check that runs
+# before it. docs/COST_MODEL.md section 3 pins these figures and two tests
+# assert the resulting costs.
+PROFILE = {"deep": (14_200, 1_000), "triage": (3_500, 150)}
+
+# How much the pre-call projection over-estimates. The real token counts arrive
+# with the reply, so the check has to guess; guessing high makes the cap
+# slightly conservative, guessing low lets through exactly the call the cap
+# exists to stop.
+PROJECTION_MARGIN = 1.5
+
+
+# Models that are KNOWN to cost nothing, which is a different statement from a
+# model whose price we do not know. MockBackend makes no network call; its
+# usages stay `priced = False` so a mock run still reports "no known rate"
+# rather than claiming a real $0.0000 bill, but its projection is genuinely
+# zero and every cap should admit it.
+FREE_MODELS = frozenset(MODELS["mock"].values())
+
+
+def project(model: str, role: str = "deep") -> float:
+    """What a call on this model is projected to cost, before making it.
+
+    Derived from PRICING rather than hard-coded, because a constant pegged to
+    one model stops bounding the call the moment another can be selected --
+    Opus 5 is two and a half times Sonnet 5, and a $0.06 constant would have
+    guarded nothing.
+
+    An unpriced model cannot be projected. That is a refusal rather than a
+    default, because `Usage.priced` is False for it, `cost_usd` comes back
+    0.0, and the ledger the daily and lifetime caps read would never see the
+    spend. A model we cannot price is a model we cannot cap.
+    """
+    if model in FREE_MODELS:
+        return 0.0
+    rates = PRICING.get(model.replace("anthropic.", ""))
+    if rates is None:
+        raise BackendError(
+            f"no price is known for model {model!r}, so no budget cap can bound "
+            "it. An unpriced call records $0.00 and the daily and lifetime caps "
+            "would never see it. Add it to model_gateway.PRICING first.")
+    tokens_in, tokens_out = PROFILE.get(role, PROFILE["deep"])
+    rate_in, rate_out = rates
+    return ((tokens_in * rate_in + tokens_out * rate_out) / 1_000_000) * PROJECTION_MARGIN
 
 KEY_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}")
 

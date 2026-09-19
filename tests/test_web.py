@@ -788,5 +788,48 @@ def test_the_html_part_carries_the_severity_as_a_word() -> None:
           "CRITICAL" not in plain and "LOW" not in plain)
 
 
+# ---------------------------------------------------------- model selection
+
+def test_a_forged_model_choice_is_refused_not_passed_through() -> None:
+    """The form field is validated against the allowlist, not trusted.
+
+    A model id that reaches a provider from a request body is a request body
+    choosing what the estate spends money on. An unrecognised value falls back
+    to smart routing rather than to an empty string, which is what
+    `Engine.models.get(..., "")` would otherwise send.
+    """
+    from eagle_eyes.model_gateway import SELECTABLE
+
+    c, d = _client()
+    try:
+        _login(c, ADMIN_EMAIL, ADMIN_PASSWORD)
+
+        # The dropdown offers exactly the allowlist, and quotes a cost.
+        r = _submit(c, log=("bot.log", NOVEL_LOG, "text/plain"))
+        for key in SELECTABLE:
+            check(f"the dropdown offers {key}", f'value="{key}"' in r.text)
+        check("  with a projected cost beside each one", "about $" in r.text)
+
+        token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
+        resp = c.post("/app/analyse",
+                      data={"token": token, "pick": ["0"],
+                            "model": "../../etc/passwd"},
+                      follow_redirects=False)
+        check("a forged choice does not error the request",
+              resp.status_code == 303, str(resp.status_code))
+        status = _wait(c, resp.headers["location"])
+        check("  the analysis still completes", status["status"] == "done",
+              str(status))
+
+        # Smart routing is what it fell back to: the stored model is the deep
+        # one, not an empty string and not the forged text.
+        model_id = c.app.state.ee.db.conn.execute(
+            "SELECT model_id FROM analysis ORDER BY id DESC LIMIT 1").fetchone()["model_id"]
+        check("  and it fell back to the configured route",
+              model_id and "passwd" not in model_id, repr(model_id))
+    finally:
+        _cleanup(c, d)
+
+
 if __name__ == "__main__":
     sys.exit(_h.run_all(globals()))

@@ -25,7 +25,8 @@ from pathlib import Path
 
 from .cache import CachedAnalysis, SharedCache
 from .fingerprint import Failure, fingerprint
-from .model_gateway import Backend, BudgetGuard, ModelReply, Usage
+from .model_gateway import (
+    MODELS, Backend, BudgetGuard, ModelReply, Usage, project)
 from .patterns import TEMPLATE_CONFIDENCE, PatternLibrary
 from .sanitize import sanitize_code, sanitize_log
 
@@ -63,18 +64,18 @@ SEVERITIES = ("low", "medium", "high", "critical")
 
 PROMPTS = Path(__file__).parent / "prompts"
 
-# What a call is ASSUMED to cost, for the budget check that happens before it is
-# made. The real figure is not knowable then -- the token counts come back with
-# the reply -- so these are deliberate over-estimates: a deep call on Sonnet 5
-# carrying a log excerpt, the code and a screenshot works out near $0.03 at
-# $2/$10 per MTok. Over-estimating makes the cap slightly conservative;
-# under-estimating would let through exactly the call the cap exists to stop.
+# The pre-call budget check now asks `model_gateway.project(model, role)`, which
+# derives the figure from PRICING. It used to be two constants pegged to Sonnet
+# 5 -- fine while Sonnet was the only model a deep call could use, and no longer
+# a bound at all once Opus 5 (two and a half times the price) became selectable.
 #
-# A cap set BELOW the deep projection refuses every deep analysis before it is
-# attempted, whatever the key or the balance -- so the hosted defaults in
-# web/spend.py are checked against these by a test rather than by eye.
-TRIAGE_PROJECTION_USD = 0.01
-DEEP_PROJECTION_USD = 0.06
+# These two remain as the SONNET figures, because web/spend.py's defaults are
+# checked against them and docs/COST_MODEL.md quotes them. A cap set below the
+# projection refuses every call before it is attempted, whatever the key or the
+# balance, so a test asserts the caps admit every selectable model rather than
+# anyone checking by eye.
+TRIAGE_PROJECTION_USD = project(MODELS["byok"]["triage"], "triage")
+DEEP_PROJECTION_USD = project(MODELS["byok"]["deep"], "deep")
 
 # Caps keep one runaway log from blowing the context window and the budget.
 LOG_EXCERPT_CHARS = 12_000
@@ -278,7 +279,7 @@ class Engine:
         prompt = load_prompt("triage.user.txt").format(
             bot_label=bot_label, exception_type=failure.exception_type,
             log_excerpt=log_excerpt, code_summary=code_summary)
-        self.budget.check(TRIAGE_PROJECTION_USD)
+        self.budget.check(project(model, "triage"))
         reply = self.backend.complete(
             model, load_prompt("triage.system.txt"),
             [{"type": "text", "text": prompt}], 512)
@@ -319,7 +320,7 @@ class Engine:
             content.append({"type": "image", "data": image})
 
         model = self.models.get("deep", "")
-        self.budget.check(DEEP_PROJECTION_USD)
+        self.budget.check(project(model, "deep"))
         reply = self.backend.complete(model, load_prompt("deep.system.txt"), content, 4096)
         self.budget.record(reply.usage)
 
