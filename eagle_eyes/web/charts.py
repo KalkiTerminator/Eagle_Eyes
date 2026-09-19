@@ -283,6 +283,21 @@ def meter(value: float, cap: float, label: str, *, fmt=None) -> str:
 def stacked(rows: list[tuple[str, int]]) -> str:
     """One stacked bar for a breakdown, with a labelled legend.
 
+    THIS IS THE PART-TO-WHOLE FORM HERE. A pie or a donut was considered for the
+    routing split and rejected, so that nobody adds one later thinking it was
+    merely overlooked:
+
+      * A donut asks the reader to compare arc lengths. On the routing split --
+        251 known-pattern, 7 novel, 2 unclassified -- a bar states in one glance
+        what arcs make you estimate, and the legend already carries the exact
+        counts and percentages either way.
+      * Where a donut is genuinely readable is a handful of segments of similar
+        size, which is also the case where it is least needed.
+      * A single ratio against a LIMIT is not this form at all; that is `meter`.
+
+    The POC kit this product borrowed its look from specified a CSS
+    conic-gradient pie for exactly this chart. That part was not adopted.
+
     A 2px surface gap separates segments, so adjacent fills never appear to
     merge into one.
     """
